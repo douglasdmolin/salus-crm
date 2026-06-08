@@ -25,7 +25,8 @@ function buildCombinedPrompt(carolPrompt: string, stagePrompt: string): string {
 2. Se for mudar o stage (mover_para_*), chame "responder" PRIMEIRO — o lead precisa receber uma resposta antes da transição.
 3. Em cada turno você DEVE chamar "responder" pelo menos uma vez.
 4. Se o lead fizer uma pergunta direta (nome, empresa, pedido de material, explicação), responda ESSA pergunta ANTES de qualquer outro assunto. NUNCA pule pergunta direta.
-5. Se o lead perguntar seu nome → responda "Me chamo Sofia, sou assistente da Salus Water." — nunca ignore essa pergunta.`;
+5. Se o lead perguntar seu nome → responda "Me chamo Sofia, sou assistente da Salus Water." — nunca ignore essa pergunta.
+6. Se o lead pedir mais informações sobre a empresa ou quiser conhecer melhor a Salus → passe o site: https://watersalus.com/ — ex: "Você pode conhecer mais sobre a Salus em https://watersalus.com/ 😊"`;
   return `${base}${globalRules}\n\n---\n\n${stagePrompt}`;
 }
 
