@@ -1,0 +1,113 @@
+/* CRM Scoped Tokens — SALUS Lead Engine
+ * Paleta Salus: Navy #0a2342 + Cyan #00b4cc + Azure #1e6fa8
+ * Scoped via .crm-root class to avoid clobbering dark theme of landing page
+ */
+.crm-root {
+  /* ── Salus Brand Tokens ── */
+  --salus-navy: #0a2342;
+  --salus-navy-light: #0d2d54;
+  --salus-cyan: #00b4cc;
+  --salus-cyan-hover: #009db8;
+  --salus-azure: #1e6fa8;
+  --salus-light-cyan: #7ec8e3;
+
+  /* ── Neutros levemente frios ── */
+  --crm-bg: #f4f7fb;
+  --crm-surface: #ffffff;
+  --crm-surface-2: #f0f4f9;
+  --crm-surface-3: #e8eef6;
+  --crm-border: #dce4ef;
+  --crm-border-strong: #c2cfe0;
+  --crm-text: #0a2342;
+  --crm-text-2: #3d5475;
+  --crm-text-3: #6b82a0;
+  --crm-text-4: #9db2cb;
+
+  /* ── Acento Salus Cyan (substitui azul genérico) ── */
+  --crm-accent: #00b4cc;
+  --crm-accent-hover: #009db8;
+  --crm-accent-soft: #e6f8fb;
+  --crm-accent-soft-2: #b3eaf4;
+
+  /* ── Semânticos ── */
+  --crm-success: #16a34a;
+  --crm-success-soft: #dcfce7;
+  --crm-danger: #dc2626;
+  --crm-danger-soft: #fee2e2;
+  --crm-warning: #d97706;
+  --crm-warning-soft: #fef3c7;
+  --crm-neutral: #64748b;
+  --crm-neutral-soft: #f1f5f9;
+
+  /* ── Sentimento ── */
+  --crm-positive: #16a34a;
+  --crm-neutral-sent: #64748b;
+  --crm-negative: #dc2626;
+
+  /* ── Estágios ── */
+  --crm-stage-ia: #8b5cf6;
+  --crm-stage-contact: #00b4cc;
+  --crm-stage-call: #1e6fa8;
+  --crm-stage-meet: #0a2342;
+  --crm-stage-nego: #d97706;
+  --crm-stage-won: #16a34a;
+  --crm-stage-lost: #dc2626;
+  --crm-stage-discarded: #94a3b8;
+  --crm-stage-future: #64748b;
+  --crm-stage-novo: #94a3b8;
+
+  /* ── Sombras ── */
+  --crm-shadow-sm: 0 1px 3px rgba(10, 35, 66, 0.05);
+  --crm-shadow-md: 0 2px 8px rgba(10, 35, 66, 0.08), 0 1px 3px rgba(10, 35, 66, 0.04);
+  --crm-shadow-lg: 0 12px 32px rgba(10, 35, 66, 0.12), 0 4px 12px rgba(10, 35, 66, 0.06);
+  --crm-shadow-xl: 0 24px 64px rgba(10, 35, 66, 0.20), 0 8px 24px rgba(10, 35, 66, 0.08);
+
+  --crm-radius-sm: 6px;
+  --crm-radius: 10px;
+  --crm-radius-lg: 14px;
+
+  background: var(--crm-bg);
+  color: var(--crm-text);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+}
+
+.crm-root * { box-sizing: border-box; }
+
+.crm-root button {
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: inherit;
+}
+
+.crm-root input, .crm-root textarea {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+/* Scrollbars no CRM */
+.crm-root ::-webkit-scrollbar { width: 10px; height: 10px; }
+.crm-root ::-webkit-scrollbar-track { background: transparent; }
+.crm-root ::-webkit-scrollbar-thumb {
+  background: var(--crm-border);
+  border-radius: 10px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.crm-root ::-webkit-scrollbar-thumb:hover {
+  background: var(--crm-border-strong);
+  background-clip: content-box;
+}
+
+/* Animations */
+@keyframes crm-fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes crm-slideUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes crm-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+@keyframes crm-shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
