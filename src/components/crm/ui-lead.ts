@@ -1,4 +1,4 @@
-import type { Application, CrmStage } from "../../lib/supabase";
+import type { Application, CrmStage, LeadTag } from "../../lib/supabase";
 
 export type UiLead = {
   id: string;
@@ -22,6 +22,7 @@ export type UiLead = {
   aiSummary: string;
   aiPaused: boolean;
   descarteMotivo: string | null;
+  leadTags: LeadTag[];
 };
 
 /** Optional messages lookup: lead id → { texto, direction, ts } of most recent message. */
@@ -208,6 +209,7 @@ export function applicationToUiLead(app: Application, messageIdx?: MessageIndex)
       `Lead em "${app.crm_stage}" — ${role || "perfil"} ${company ? `@ ${company}` : ""}`,
     aiPaused: Boolean(app.ai_paused),
     descarteMotivo: app.descarte_motivo ?? null,
+    leadTags: Array.isArray(app.lead_tags) ? (app.lead_tags as LeadTag[]) : [],
   };
 }
 

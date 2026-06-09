@@ -686,19 +686,46 @@ export function ChatModal({ lead: initialLead, onClose }: { lead: UiLead; onClos
           <div>
             <div style={{
               fontSize: 11, color: "var(--crm-text-3)", fontWeight: 600,
-              textTransform: "uppercase", letterSpacing: "0.05em",
-              marginBottom: 8, display: "flex", alignItems: "center", gap: 6,
+              textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8,
             }}>
               Tags
-              <span style={{
-                fontSize: 9, fontWeight: 500, textTransform: "none", letterSpacing: 0,
-                padding: "1px 6px", background: "var(--crm-surface-3)",
-                color: "var(--crm-text-3)", borderRadius: 10,
-              }}>próxima versão</span>
+              {lead.leadTags.length > 0 && (
+                <span style={{
+                  fontSize: 9, fontWeight: 500, textTransform: "none", letterSpacing: 0,
+                  padding: "1px 6px", background: "var(--crm-surface-3)",
+                  color: "var(--crm-text-3)", borderRadius: 10, marginLeft: 6,
+                }}>{lead.leadTags.length}</span>
+              )}
             </div>
-            <div style={{ fontSize: 11.5, color: "var(--crm-text-4)", fontStyle: "italic" }}>
-              Sistema de tags virá em breve.
-            </div>
+            {lead.leadTags.length === 0 ? (
+              <div style={{ fontSize: 11.5, color: "var(--crm-text-4)", fontStyle: "italic" }}>
+                Nenhuma tag ainda — Sofia vai adicionando conforme a conversa avança.
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                {lead.leadTags.map((t, i) => {
+                  const CAT_COLORS: Record<string, { bg: string; color: string }> = {
+                    dor:     { bg: "#fef2f2", color: "#dc2626" },
+                    familia: { bg: "#eff6ff", color: "#2563eb" },
+                    imovel:  { bg: "#f9fafb", color: "#4b5563" },
+                    decisao: { bg: "#f5f3ff", color: "#7c3aed" },
+                    icp:     { bg: "#ecfdf5", color: "#059669" },
+                    sinal:   { bg: "#fffbeb", color: "#d97706" },
+                  };
+                  const style = CAT_COLORS[t.categoria] ?? { bg: "var(--crm-surface-3)", color: "var(--crm-text-2)" };
+                  const label = t.tag.replace(/^(dor_|icp_)/, "").replace(/_/g, " ");
+                  return (
+                    <span key={i} title={t.valor ?? t.tag} style={{
+                      fontSize: 10.5, fontWeight: 500, padding: "2px 8px",
+                      borderRadius: 10, background: style.bg, color: style.color,
+                      border: `1px solid ${style.color}22`,
+                    }}>
+                      {label}
+                    </span>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           <div>

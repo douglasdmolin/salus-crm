@@ -82,6 +82,9 @@ export type Application = {
   // Justificativa do descarte (preenchida quando crm_stage='descartado')
   descarte_motivo: string | null;
 
+  // Tags coletadas em tempo real durante conversas (migration 016)
+  lead_tags: LeadTag[];
+
   // Campos do schema Salus leads (migration 005)
   id_unico: string | null;
   nome_para_mensagem: string | null;
@@ -96,6 +99,17 @@ export type Application = {
 
 /** Stage ID — any text value referencing kanban_stages.id */
 export type CrmStage = string;
+
+/**
+ * Tag coletada em tempo real durante a conversa.
+ * Categorias fixas para organização; tag em texto livre para descoberta orgânica de ICPs.
+ */
+export type LeadTag = {
+  tag: string;
+  categoria: "imovel" | "familia" | "dor" | "decisao" | "icp" | "sinal";
+  valor?: string;
+  set_at: string;
+};
 
 export type KanbanStage = {
   id: string;

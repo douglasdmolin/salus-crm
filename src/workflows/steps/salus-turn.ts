@@ -26,7 +26,8 @@ function buildCombinedPrompt(carolPrompt: string, stagePrompt: string): string {
 3. Em cada turno você DEVE chamar "responder" pelo menos uma vez.
 4. Se o lead fizer uma pergunta direta (nome, empresa, pedido de material, explicação), responda ESSA pergunta ANTES de qualquer outro assunto. NUNCA pule pergunta direta.
 5. Se o lead perguntar seu nome → responda "Me chamo Sofia, sou assistente da Salus Water." — nunca ignore essa pergunta.
-6. Se o lead pedir mais informações sobre a empresa ou quiser conhecer melhor a Salus → passe o site: https://watersalus.com/ — ex: "Você pode conhecer mais sobre a Salus em https://watersalus.com/ 😊"`;
+6. Se o lead pedir mais informações sobre a empresa ou quiser conhecer melhor a Salus → passe o site: https://watersalus.com/ — ex: "Você pode conhecer mais sobre a Salus em https://watersalus.com/ 😊"
+7. FILOSOFIA — você NÃO vende: ajuda o lead a comprar. Compreenda antes de influenciar. Faça perguntas que levem o lead a articular a própria dor e chegar à própria conclusão. Nunca liste benefícios do produto sem ser perguntado. A decisão é sempre do lead — crie as condições para ele decidir, não tente convencê-lo.`;
   return `${base}${globalRules}\n\n---\n\n${stagePrompt}`;
 }
 
@@ -176,6 +177,35 @@ export async function salusTurn(
     },
   });
 
+  const registrar_tag = tool({
+    description: `Registra uma característica do lead descoberta durante a conversa.
+Use sempre que o lead revelar informação relevante — imóvel, família, dor, decisão ou sinal de interesse.
+Para ICPs: use tags predefinidas quando encaixar, ou crie uma nova livremente se identificar um padrão novo.
+
+TAGS PREDEFINIDAS (use quando encaixar):
+• imovel: proprietario, inquilino, casa, apto
+• familia: tem_filhos, tem_bebe, tem_pets
+• dor: dor_gosto_cheiro, dor_calcario, dor_pele_cabelo, dor_saude_digestiva, dor_saude_pele, dor_alergia_agua, dor_gasto_filtros, dor_maquinas
+• decisao: decisor, consulta_conjuge, consulta_gestor
+• icp: icp_familia_saude, icp_economista, icp_estetico, icp_cetico — ou CRIE UM NOVO se o perfil não se encaixa
+• sinal: interesse_alto, perguntou_preco, ja_pesquisou`,
+    inputSchema: z.object({
+      tag: z.string().describe("Nome da tag — use predefinidas ou crie nova livremente para novos padrões de ICP"),
+      categoria: z.enum(["imovel", "familia", "dor", "decisao", "icp", "sinal"]).describe("Categoria organizacional da tag"),
+      valor: z.string().optional().describe("Contexto opcional, ex: 'dor de barriga frequente' ou 'mora em Hialeah'"),
+    }),
+    execute: async ({ tag, categoria, valor }: { tag: string; categoria: "imovel" | "familia" | "dor" | "decisao" | "icp" | "sinal"; valor?: string }) => {
+      const { data: current } = await supabase.from("applications").select("lead_tags").eq("id", leadId).maybeSingle();
+      const existing: Array<{ tag: string; categoria: string; valor?: string; set_at: string }> = (current?.lead_tags as Array<{ tag: string; categoria: string; valor?: string; set_at: string }>) ?? [];
+      const alreadySet = existing.some((t) => t.tag === tag);
+      if (alreadySet) return { ok: true, skipped: true };
+      const updated = [...existing, { tag, categoria, valor, set_at: new Date().toISOString() }];
+      await supabase.from("applications").update({ lead_tags: updated }).eq("id", leadId);
+      logEvent(leadId, "tag_set", lead.crm_stage, { tag, categoria, valor });
+      return { ok: true };
+    },
+  });
+
   const notificar_agendamento_ze = tool({
     description: "Notifica o Zé via WhatsApp para confirmar agenda do Marcelo ou alertar lead quente.",
     inputSchema: z.object({
@@ -244,22 +274,25 @@ export async function salusTurn(
     },
   });
 
-  const confirmar_visita = tool({
-    description: "Registra data, hora e endereço da visita técnica do Marcelo. Use quando o lead confirmou um horário específico. O lead permanece em Agendado até a visita acontecer — após a visita, use mover_para_pos_visita.",
+  const mover_para_agendado = tool({
+    description: "Move lead para Agendado. Use APENAS quando lead confirmou DIA + HORÁRIO + ENDEREÇO. Todos os três campos são obrigatórios — não avance sem eles.",
     inputSchema: z.object({
-      data_visita: z.string(),
-      horario_visita: z.string(),
-      endereco: z.string().optional(),
-      observacoes: z.string().optional(),
+      data_visita: z.string().describe("Data confirmada pelo lead, ex: 'sexta dia 13 de junho'"),
+      horario_visita: z.string().describe("Horário confirmado pelo lead, ex: '14h'"),
+      local_visita: z.string().describe("Endereço completo ou modalidade, ex: '123 SW 8th St, Miami' ou 'online via Google Meet'"),
     }),
-    execute: async ({ data_visita, horario_visita, endereco, observacoes }: { data_visita: string; horario_visita: string; endereco?: string; observacoes?: string }) => {
+    execute: async ({ data_visita, horario_visita, local_visita }: { data_visita: string; horario_visita: string; local_visita: string }) => {
+      if (!data_visita.trim() || !horario_visita.trim() || !local_visita.trim()) {
+        return { ok: false, reason: "Agendamento incompleto — necessário: data + horário + endereço confirmados pelo lead." };
+      }
       let existing: Record<string, unknown> = {};
       try { existing = JSON.parse(lead.qualification_notes ?? "{}"); } catch { /* ignore */ }
-      const merged = { ...existing, data_visita, horario_visita, endereco, observacoes };
+      const merged = { ...existing, data_visita, horario_visita, local_visita };
       await supabase.from("applications")
         .update({ qualification_notes: JSON.stringify(merged), call_scheduled_at: new Date().toISOString() })
         .eq("id", leadId);
-      logEvent(leadId, "visit_confirmed", lead.crm_stage, { data_visita, horario_visita, endereco });
+      await transitionStage(leadId, lead.crm_stage, "agendado");
+      logEvent(leadId, "visit_scheduled", "agendado", { data_visita, horario_visita, local_visita });
       return { ok: true };
     },
   });
@@ -309,12 +342,55 @@ export async function salusTurn(
   const mover_para_lead_contatado = mkP("lead_contatado");          // volta para aguardando resposta
   const mover_para_respondeu      = mkP("respondeu");               // lead respondeu → qualificação
   const mover_para_aquecendo      = mkP("aquecendo");               // engajado mas não pronto para agendar
-  const mover_para_agendado       = mkP("agendado");                // confirmar logística da visita
+  // mover_para_agendado — definido acima com gate determinístico (data + horário + endereço)
   const mover_para_objecao        = mkP("objecao");                 // objeção comercial ativa
-  const mover_para_pos_visita     = mkP("pos_visita");              // Marcelo já visitou
   const mover_para_contato_futuro = mkP("contato_futuro");          // reativação futura
-  const mover_para_fechado        = mkP("fechado", true);           // contrato fechado → pausa IA
   const mover_para_perdido        = mkP("perdido", true);           // saiu do funil → pausa IA
+
+  const mover_para_pos_visita = tool({
+    description: "Move lead para Pós-Visita após Marcelo ter visitado. Informe se a visita foi realizada ou se o lead não atendeu (no_show).",
+    inputSchema: z.object({
+      status_visita: z.enum(["realizada", "no_show"]).describe("'realizada' se Marcelo visitou; 'no_show' se lead não atendeu"),
+      observacoes: z.string().optional().describe("Contexto adicional sobre a visita"),
+    }),
+    execute: async ({ status_visita, observacoes }: { status_visita: "realizada" | "no_show"; observacoes?: string }) => {
+      let existing: Record<string, unknown> = {};
+      try { existing = JSON.parse(lead.qualification_notes ?? "{}"); } catch { /* ignore */ }
+      const merged = { ...existing, visita_status: status_visita, ...(observacoes ? { visita_observacoes: observacoes } : {}) };
+      await supabase.from("applications").update({ qualification_notes: JSON.stringify(merged) }).eq("id", leadId);
+      if (status_visita === "no_show") {
+        await supabase.from("applications")
+          .update({ ai_paused: true, ai_paused_at: new Date().toISOString(), notes: `[No-show na visita técnica]` })
+          .eq("id", leadId);
+        logEvent(leadId, "visit_no_show", lead.crm_stage, { observacoes });
+        return { ok: true, action: "escalado_no_show" };
+      }
+      await transitionStage(leadId, lead.crm_stage, "pos_visita");
+      return { ok: true };
+    },
+  });
+
+  const mover_para_fechado = tool({
+    description: "Move lead para Fechado. Use APENAS quando lead confirmou explicitamente que vai fechar negócio e o valor foi acordado.",
+    inputSchema: z.object({
+      valor_acordado: z.string().describe("Valor ou plano acordado, ex: '$4.500 à vista' ou 'plano mensal $89/mês'"),
+      confirmacao_lead: z.boolean().describe("Lead confirmou explicitamente que vai fechar? Só marque true se disse claramente que sim."),
+    }),
+    execute: async ({ valor_acordado, confirmacao_lead }: { valor_acordado: string; confirmacao_lead: boolean }) => {
+      if (!confirmacao_lead) {
+        return { ok: false, reason: "Lead ainda não confirmou o fechamento explicitamente. Continue a conversa até obter confirmação clara." };
+      }
+      let existing: Record<string, unknown> = {};
+      try { existing = JSON.parse(lead.qualification_notes ?? "{}"); } catch { /* ignore */ }
+      const merged = { ...existing, valor_acordado, fechado_em: new Date().toISOString() };
+      await supabase.from("applications")
+        .update({ qualification_notes: JSON.stringify(merged), ai_paused: true, ai_paused_at: new Date().toISOString() })
+        .eq("id", leadId);
+      logEvent(leadId, "lead_fechado", "fechado", { valor_acordado });
+      await transitionStage(leadId, lead.crm_stage, "fechado");
+      return { ok: true };
+    },
+  });
 
   // ── Aliases legados (compatibilidade com prompts configurados no DB) ────
   const promover_para_followup_1       = mover_para_lead_contatado;
@@ -340,9 +416,9 @@ export async function salusTurn(
     tools: {
       // ── Ações ──────────────────────────────────────────────────────────
       responder,
+      registrar_tag,
       update_lead_metadata,
       notificar_agendamento_ze,
-      confirmar_visita,
       agendar_retorno,         // universal: qualquer etapa → contato_futuro com data
       escalar_para_humano,
       register_opt_out,

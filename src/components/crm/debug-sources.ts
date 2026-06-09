@@ -39,6 +39,7 @@ export const DEBUG_SOURCES = {
   aiScore: "🔄 applications.enrichment_score || deriveScore(crm_stage, reply_count) — UI mostra como 'Score IA — em breve' (OSINT atual é gambiarra)",
   aiScoreLabel: "🔄 aiScore → 'Alta' (≥75) | 'Média' (≥50) | 'Baixa' — escondido por ora",
   descarteMotivo: "📊 applications.descarte_motivo (preenchido em backfill bucket-based ou pela tool 'descartar_lead' da Carol)",
+  leadTags: "📊 applications.lead_tags (JSONB array — tags coletadas pela tool registrar_tag durante conversas)",
   sentiment: "📊 applications.ai_sentiment (classificado por Gemini 2.5 Flash Lite após cada msg inbound)",
   nextAction: "🔄 derive(crm_stage, reply_count, last inbound text)",
   nextActionType: "🔄 mapped from crm_stage",
