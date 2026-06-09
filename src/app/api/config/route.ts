@@ -1,9 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "../../../lib/supabase";
 import { ALLOWED_MODELS, getCarolConfig, getUazapiConfig, getNotificationPhone, CAROL_DEFAULT_PROMPT } from "../../../lib/crm-config";
+import { getGoogleCalendarConfig } from "../../../lib/google-calendar";
 
 export async function GET() {
-  const [cfg, uazapi, notificationPhone] = await Promise.all([getCarolConfig(), getUazapiConfig(), getNotificationPhone()]);
+  const [cfg, uazapi, notificationPhone, gcal] = await Promise.all([
+    getCarolConfig(),
+    getUazapiConfig(),
+    getNotificationPhone(),
+    getGoogleCalendarConfig(),
+  ]);
 
   const supabase = createServiceClient();
   const { data: cpRow } = await supabase
@@ -21,6 +27,9 @@ export async function GET() {
     uazapiTokenSet: Boolean(uazapi?.token ?? process.env.UAZAPI_TOKEN),
     notificationPhone: notificationPhone ?? "",
     copyGenerationPrompt: (cpRow?.value as string) ?? "",
+    gcalCalendarId:   gcal?.calendarId   ?? "",
+    gcalClientEmail:  gcal?.clientEmail  ?? "",
+    gcalPrivateKeySet: Boolean(gcal?.privateKey),
   });
 }
 
@@ -34,6 +43,9 @@ export async function PUT(req: NextRequest) {
     uazapiToken?: string;
     uazapiInstance?: string;
     notificationPhone?: string;
+    gcalCalendarId?: string;
+    gcalClientEmail?: string;
+    gcalPrivateKey?: string;
   };
   try {
     body = await req.json();
@@ -71,6 +83,15 @@ export async function PUT(req: NextRequest) {
 
   if (typeof (body as Record<string, unknown>).copyGenerationPrompt === "string")
     updates.push({ key: "copy_generation_prompt", value: (body as Record<string, unknown>).copyGenerationPrompt as string });
+
+  if (typeof body.gcalCalendarId === "string" && body.gcalCalendarId.trim().length > 0)
+    updates.push({ key: "gcal_calendar_id", value: body.gcalCalendarId.trim() });
+
+  if (typeof body.gcalClientEmail === "string" && body.gcalClientEmail.includes("@"))
+    updates.push({ key: "gcal_client_email", value: body.gcalClientEmail.trim() });
+
+  if (typeof body.gcalPrivateKey === "string" && body.gcalPrivateKey.trim().length > 50)
+    updates.push({ key: "gcal_private_key", value: body.gcalPrivateKey.trim() });
 
   if (updates.length === 0) return NextResponse.json({ error: "no valid fields" }, { status: 400 });
 

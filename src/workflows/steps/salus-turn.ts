@@ -6,6 +6,7 @@ import { createServiceClient, type Application } from "../../lib/supabase";
 import { carolSystemPrompt } from "../prompts/ai-persona";
 import { getFallbackPrompt, getFallbackModel, AI_DISABLED_STAGES } from "../prompts/stages/index";
 import { getCarolConfig, getNotificationPhone } from "../../lib/crm-config";
+import { getGoogleCalendarConfig, isSlotAvailable, createCalendarEvent } from "../../lib/google-calendar";
 
 /**
  * Combina o carol_prompt global (persona/voz/conhecimento da marca) com o
@@ -275,25 +276,61 @@ TAGS PREDEFINIDAS (use quando encaixar):
   });
 
   const mover_para_agendado = tool({
-    description: "Move lead para Agendado. Use APENAS quando lead confirmou DIA + HORÁRIO + ENDEREÇO. Todos os três campos são obrigatórios — não avance sem eles.",
+    description: "Move lead para Agendado. Use APENAS quando lead confirmou DIA + HORÁRIO + ENDEREÇO. Todos os três campos são obrigatórios. Se souber a data/hora em formato ISO (ex: '2026-06-13T14:00:00'), passe em datetime_iso — será usado para verificar e criar o evento no Google Calendar.",
     inputSchema: z.object({
-      data_visita: z.string().describe("Data confirmada pelo lead, ex: 'sexta dia 13 de junho'"),
+      data_visita:    z.string().describe("Data confirmada pelo lead, ex: 'sexta dia 13 de junho'"),
       horario_visita: z.string().describe("Horário confirmado pelo lead, ex: '14h'"),
-      local_visita: z.string().describe("Endereço completo ou modalidade, ex: '123 SW 8th St, Miami' ou 'online via Google Meet'"),
+      local_visita:   z.string().describe("Endereço completo ou modalidade, ex: '123 SW 8th St, Miami'"),
+      datetime_iso:   z.string().optional().describe("Data e hora em ISO 8601, ex: '2026-06-13T14:00:00' — para integração com Google Calendar"),
     }),
-    execute: async ({ data_visita, horario_visita, local_visita }: { data_visita: string; horario_visita: string; local_visita: string }) => {
+    execute: async ({ data_visita, horario_visita, local_visita, datetime_iso }: { data_visita: string; horario_visita: string; local_visita: string; datetime_iso?: string }) => {
       if (!data_visita.trim() || !horario_visita.trim() || !local_visita.trim()) {
         return { ok: false, reason: "Agendamento incompleto — necessário: data + horário + endereço confirmados pelo lead." };
       }
+
+      let calendarEventLink: string | null = null;
+
+      // Verificar disponibilidade e criar evento no Google Calendar (se configurado e datetime_iso fornecido)
+      if (datetime_iso) {
+        try {
+          const gcalCfg = await getGoogleCalendarConfig();
+          if (gcalCfg) {
+            const startIso = new Date(datetime_iso).toISOString();
+            const endIso   = new Date(new Date(datetime_iso).getTime() + 90 * 60 * 1000).toISOString(); // +90min
+
+            const available = await isSlotAvailable(gcalCfg, startIso, endIso);
+            if (!available) {
+              return {
+                ok: false,
+                reason: `Horário ${horario_visita} de ${data_visita} está ocupado no calendário do Marcelo. Pergunte ao lead outra opção de data/horário.`,
+              };
+            }
+
+            calendarEventLink = await createCalendarEvent(gcalCfg, {
+              summary:     `Visita Salus Water — ${lead.full_name}`,
+              description: `Lead: ${lead.full_name} | Tel: ${lead.phone} | Endereço: ${local_visita}`,
+              location:    local_visita,
+              startIso,
+              endIso,
+            });
+            logEvent(leadId, "calendar_event_created", "agendado", { calendarEventLink, startIso });
+          }
+        } catch (err) {
+          // Falha no Google Calendar não bloqueia o agendamento
+          console.warn("mover_para_agendado: Google Calendar error (non-blocking)", String(err));
+          logEvent(leadId, "calendar_event_error", lead.crm_stage, { error: String(err) });
+        }
+      }
+
       let existing: Record<string, unknown> = {};
       try { existing = JSON.parse(lead.qualification_notes ?? "{}"); } catch { /* ignore */ }
-      const merged = { ...existing, data_visita, horario_visita, local_visita };
+      const merged = { ...existing, data_visita, horario_visita, local_visita, ...(calendarEventLink ? { calendar_event_link: calendarEventLink } : {}) };
       await supabase.from("applications")
         .update({ qualification_notes: JSON.stringify(merged), call_scheduled_at: new Date().toISOString() })
         .eq("id", leadId);
       await transitionStage(leadId, lead.crm_stage, "agendado");
-      logEvent(leadId, "visit_scheduled", "agendado", { data_visita, horario_visita, local_visita });
-      return { ok: true };
+      logEvent(leadId, "visit_scheduled", "agendado", { data_visita, horario_visita, local_visita, calendarEventLink });
+      return { ok: true, calendarEventLink };
     },
   });
 

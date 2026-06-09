@@ -21,6 +21,9 @@ type ConfigResponse = {
   uazapiInstance: string | null;
   uazapiTokenSet: boolean;
   notificationPhone: string;
+  gcalCalendarId: string;
+  gcalClientEmail: string;
+  gcalPrivateKeySet: boolean;
 };
 
 type WhatsappStatus = {
@@ -75,6 +78,14 @@ export default function ConfigPage() {
   const [notificationPhone, setNotificationPhone] = useState("");
   const [savingUazapi, setSavingUazapi] = useState(false);
   const [testingConn, setTestingConn] = useState(false);
+
+  // Google Calendar
+  const [gcalCalendarId, setGcalCalendarId] = useState("");
+  const [gcalClientEmail, setGcalClientEmail] = useState("");
+  const [gcalPrivateKey, setGcalPrivateKey] = useState("");
+  const [gcalPrivateKeySet, setGcalPrivateKeySet] = useState(false);
+  const [showGcalKey, setShowGcalKey] = useState(false);
+  const [savingGcal, setSavingGcal] = useState(false);
 
   // Etapas do kanban
   const [stages, setStages] = useState<KanbanStageRow[]>([]);
@@ -204,6 +215,9 @@ export default function ConfigPage() {
       setUazapiInstance(c.uazapiInstance ?? "");
       setUazapiTokenSet(c.uazapiTokenSet);
       setNotificationPhone(c.notificationPhone ?? "");
+      setGcalCalendarId(c.gcalCalendarId ?? "");
+      setGcalClientEmail(c.gcalClientEmail ?? "");
+      setGcalPrivateKeySet(c.gcalPrivateKeySet ?? false);
       setWaStatus((await waRes.json()) as WhatsappStatus);
       const cr = (await crRes.json()) as AnthropicCredits;
       setCredits(cr);
@@ -267,6 +281,31 @@ export default function ConfigPage() {
       setErr((e as Error).message);
     } finally {
       setSavingUazapi(false);
+    }
+  }
+
+  async function saveGcal() {
+    if (!gcalCalendarId.trim()) { setErr("Calendar ID é obrigatório"); return; }
+    if (!gcalClientEmail.includes("@")) { setErr("Client email inválido"); return; }
+    if (!gcalPrivateKey.trim() && !gcalPrivateKeySet) { setErr("Private key é obrigatória"); return; }
+    setSavingGcal(true);
+    setErr(null);
+    try {
+      const body: Record<string, string> = { gcalCalendarId, gcalClientEmail };
+      if (gcalPrivateKey.trim()) body.gcalPrivateKey = gcalPrivateKey.trim();
+      const res = await fetch("/api/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error ?? `HTTP ${res.status}`);
+      setGcalPrivateKey("");
+      setGcalPrivateKeySet(true);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setSavingGcal(false);
     }
   }
 
@@ -476,6 +515,83 @@ export default function ConfigPage() {
               </button>
               <button onClick={saveUazapi} disabled={savingUazapi || !uazapiUrl} style={btnPrimary}>
                 {savingUazapi ? "Salvando..." : "Salvar configurações Uazapi"}
+              </button>
+            </div>
+          </div>
+        </section>
+
+        {/* Google Calendar */}
+        <section style={sectionStyle}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+            <h2 style={{ ...h2Style, marginBottom: 0 }}>Google Calendar</h2>
+            <span style={{
+              display: "inline-flex", alignItems: "center", gap: 6,
+              padding: "4px 12px", borderRadius: 999, fontSize: 12, fontWeight: 700,
+              background: gcalPrivateKeySet ? "var(--crm-success-soft)" : "var(--crm-surface-2)",
+              color: gcalPrivateKeySet ? "var(--crm-success)" : "var(--crm-text-3)",
+              border: `1px solid ${gcalPrivateKeySet ? "var(--crm-success)" : "var(--crm-border)"}`,
+            }}>
+              <span style={{ width: 7, height: 7, borderRadius: "50%", background: gcalPrivateKeySet ? "var(--crm-success)" : "var(--crm-text-3)" }} />
+              {gcalPrivateKeySet ? "Configurado" : "Não configurado"}
+            </span>
+          </div>
+
+          <div style={{ fontSize: 12, color: "var(--crm-text-3)", marginBottom: 14, lineHeight: 1.6 }}>
+            Quando configurado, ao agendar uma visita a Sofia verifica automaticamente a disponibilidade no calendário e cria o evento. Use uma <strong>Service Account</strong> com acesso ao calendário do Marcelo.
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div>
+              <label style={labelStyle}>Calendar ID</label>
+              <input type="text" value={gcalCalendarId}
+                onChange={(e) => setGcalCalendarId(e.target.value)}
+                placeholder="ex: marcelo@empresa.com ou abc123xyz@group.calendar.google.com"
+                style={{ ...inputStyle, fontFamily: "JetBrains Mono, monospace" }} />
+              <div style={{ fontSize: 11, color: "var(--crm-text-3)", marginTop: 4 }}>
+                Calendário → Configurações → Integração do Google Agenda → ID do calendário
+              </div>
+            </div>
+
+            <div>
+              <label style={labelStyle}>Client Email (Service Account)</label>
+              <input type="email" value={gcalClientEmail}
+                onChange={(e) => setGcalClientEmail(e.target.value)}
+                placeholder="nome@projeto.iam.gserviceaccount.com"
+                style={{ ...inputStyle, fontFamily: "JetBrains Mono, monospace" }} />
+            </div>
+
+            <div>
+              <label style={labelStyle}>
+                Private Key (JSON)
+                {gcalPrivateKeySet && !gcalPrivateKey && (
+                  <span style={{ fontWeight: 400, color: "var(--crm-success)", marginLeft: 8 }}>✓ configurada</span>
+                )}
+              </label>
+              <div style={{ display: "flex", gap: 6 }}>
+                <textarea
+                  value={gcalPrivateKey}
+                  onChange={(e) => setGcalPrivateKey(e.target.value)}
+                  rows={showGcalKey ? 8 : 2}
+                  placeholder={gcalPrivateKeySet ? "Deixe em branco para manter a chave atual" : "Cole o conteúdo do campo private_key do JSON da service account\n(-----BEGIN RSA PRIVATE KEY----- ...)"}
+                  style={{
+                    ...inputStyle, flex: 1, fontFamily: "JetBrains Mono, monospace",
+                    fontSize: 11, resize: "vertical",
+                    filter: !showGcalKey ? "blur(3px)" : "none",
+                  }}
+                />
+                <button type="button" onClick={() => setShowGcalKey((v) => !v)} style={{ ...btnSecondary, alignSelf: "flex-start" }}
+                  title={showGcalKey ? "Ocultar" : "Mostrar"}>
+                  {showGcalKey ? "🙈" : "👁️"}
+                </button>
+              </div>
+              <div style={{ fontSize: 11, color: "var(--crm-text-3)", marginTop: 4 }}>
+                IAM → Service Accounts → Chaves → Adicionar chave JSON. Cole apenas o valor do campo <code>private_key</code>.
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 2 }}>
+              <button onClick={saveGcal} disabled={savingGcal || !gcalCalendarId || !gcalClientEmail} style={btnPrimary}>
+                {savingGcal ? "Salvando..." : "Salvar Google Calendar"}
               </button>
             </div>
           </div>

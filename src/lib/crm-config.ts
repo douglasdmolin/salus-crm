@@ -70,6 +70,16 @@ export async function getCarolConfig(): Promise<CarolConfig> {
 
 export const CAROL_DEFAULT_PROMPT = DEFAULT_PROMPT_TEMPLATE;
 
+/** Retorna true se os 3 campos de Google Calendar estão configurados no crm_config. */
+export async function isGoogleCalendarConfigured(): Promise<boolean> {
+  const supabase = createServiceClient();
+  const { data } = await supabase
+    .from("crm_config")
+    .select("key")
+    .in("key", ["gcal_calendar_id", "gcal_client_email", "gcal_private_key"]);
+  return (data ?? []).length === 3;
+}
+
 /** Número de WhatsApp para notificações do coordenador (ex: agendamentos, leads quentes). */
 export async function getNotificationPhone(): Promise<string | null> {
   const supabase = createServiceClient();
