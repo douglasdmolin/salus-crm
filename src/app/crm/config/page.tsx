@@ -345,8 +345,6 @@ export default function ConfigPage() {
   useEffect(() => {
     load();
     loadStages();
-    const id = setInterval(load, 30_000);
-    return () => clearInterval(id);
   }, []);
 
   async function save() {
