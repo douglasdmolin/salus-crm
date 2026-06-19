@@ -6,9 +6,15 @@ import { isPhoneAllowedRuntime } from "../../../../lib/phone-whitelist";
 
 const ALLOWED_BATCH_SIZES = [10, 20, 30] as const;
 const ALLOWED_INTERVALS = [30, 60, 90] as const;
+// Stages que podem receber disparo. O disparo é específico da etapa: cada botão
+// do board envia apenas as stages da sua coluna.
+//   lead_qualificado — lead novo aguardando primeiro contato (canônico)
+//   novo             — legado (leads não migrados) — pertence à coluna "Novo Contato"
+//   lead_contatado   — re-disparo: mensagem foi enviada mas workflow não está ativo
+const ALLOWED_STAGES = ["lead_qualificado", "novo", "lead_contatado"] as const;
 
 export async function POST(req: NextRequest) {
-  let payload: { batchSize?: number; intervalSeconds?: number };
+  let payload: { batchSize?: number; intervalSeconds?: number; stages?: string[] };
   try {
     payload = await req.json();
   } catch {
@@ -25,15 +31,20 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: `intervalSeconds must be one of ${ALLOWED_INTERVALS.join(", ")}` }, { status: 400 });
   }
 
+  // Stages-alvo: precisam vir do cliente (disparo específico da etapa). Sem stages
+  // válidas não há fallback para "todas" — isso evita disparar para etapas erradas.
+  const requestedStages = Array.isArray(payload.stages)
+    ? payload.stages.filter((s) => ALLOWED_STAGES.includes(s as never))
+    : [];
+  if (requestedStages.length === 0) {
+    return NextResponse.json({ error: `stages must be a non-empty subset of ${ALLOWED_STAGES.join(", ")}` }, { status: 400 });
+  }
+
   const supabase = createServiceClient();
-  // Stages elegíveis para disparo:
-  //   lead_qualificado — lead novo aguardando primeiro contato (canônico)
-  //   novo             — legado (leads não migrados)
-  //   lead_contatado   — re-disparo: mensagem foi enviada mas workflow não está ativo
   const { data: candidates, error } = await supabase
     .from("applications")
     .select("id, full_name, phone, crm_stage, workflow_run_id")
-    .in("crm_stage", ["lead_qualificado", "novo", "lead_contatado"])
+    .in("crm_stage", requestedStages)
     .eq("do_not_contact", false)
     .is("deleted_at", null)
     .order("created_at", { ascending: true })
@@ -56,7 +67,7 @@ export async function POST(req: NextRequest) {
     .slice(0, batchSize);
 
   if (eligible.length === 0) {
-    return NextResponse.json({ error: "no eligible leads in 'novo'" }, { status: 422 });
+    return NextResponse.json({ error: `no eligible leads in ${requestedStages.join(", ")}` }, { status: 422 });
   }
 
   const leadIds = eligible.map((l) => l.id);

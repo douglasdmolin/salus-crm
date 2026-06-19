@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 
 type Result = {
   ok: true;
@@ -21,11 +21,17 @@ const INTERVALS = [
 export function DispatchModal({
   open,
   eligibleCount,
+  stages,
+  stageLabel,
   onClose,
   onDispatched,
 }: {
   open: boolean;
   eligibleCount: number;
+  /** Stages-alvo do disparo — específicas da coluna que abriu o modal. */
+  stages: string[];
+  /** Rótulo da etapa para exibição (ex: "Novo Contato"). */
+  stageLabel: string;
   onClose: () => void;
   onDispatched: () => void;
 }) {
@@ -35,14 +41,8 @@ export function DispatchModal({
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<Result | null>(null);
 
-  useEffect(() => {
-    if (open) {
-      setResult(null);
-      setError(null);
-      setSubmitting(false);
-    }
-  }, [open]);
-
+  // O estado nasce limpo a cada abertura: o KanbanBoard monta o modal só quando
+  // uma coluna é selecionada, então cada disparo é uma montagem nova (sem reset manual).
   if (!open) return null;
 
   const effectiveBatch = Math.min(batchSize, eligibleCount);
@@ -56,7 +56,7 @@ export function DispatchModal({
       const res = await fetch("/api/dispatches/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ batchSize, intervalSeconds }),
+        body: JSON.stringify({ batchSize, intervalSeconds, stages }),
       });
       const j = await res.json();
       if (!res.ok) throw new Error(j.error ?? `HTTP ${res.status}`);
@@ -88,7 +88,7 @@ export function DispatchModal({
       >
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
           <h2 style={{ fontSize: 16, fontWeight: 700, margin: 0, color: "var(--crm-text)" }}>
-            ⚡ Disparo em massa
+            ⚡ Disparo · {stageLabel}
           </h2>
           <button onClick={onClose} style={{ background: "transparent", border: "none", cursor: "pointer", color: "var(--crm-text-3)", fontSize: 18 }}>×</button>
         </div>
@@ -105,7 +105,7 @@ export function DispatchModal({
               </div>
             </div>
             <div style={{ fontSize: 12, color: "var(--crm-text-3)", marginBottom: 8 }}>
-              Os cards de <strong>Novo Contato</strong> e <strong>Lead Contatado</strong> (sem workflow ativo) serão processados e moverão para <strong>Lead Contatado</strong> conforme cada disparo é enviado.
+              Os cards de <strong>{stageLabel}</strong> (sem workflow ativo) serão processados e moverão para <strong>Lead Contatado</strong> conforme cada disparo é enviado.
             </div>
             <div style={{ maxHeight: 200, overflowY: "auto", border: "1px solid var(--crm-border)", borderRadius: 6, padding: 8 }}>
               {result.leads.map((l) => (

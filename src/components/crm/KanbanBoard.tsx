@@ -8,6 +8,17 @@ import { applicationToUiLead, type UiLead, type MessageIndex } from "./ui-lead";
 import { useTweaks } from "./tweaks-store";
 import { DispatchModal } from "./DispatchModal";
 
+/**
+ * Stages-alvo de disparo para a coluna clicada. O disparo é específico da etapa:
+ * "Novo Contato" inclui o legado `novo`; "Lead Contatado" dispara só ela própria.
+ * Retorna null para colunas que não têm botão de disparo.
+ */
+function dispatchStagesFor(stageId: string): string[] | null {
+  if (stageId === "lead_qualificado" || stageId === "novo") return ["lead_qualificado", "novo"];
+  if (stageId === "lead_contatado") return ["lead_contatado"];
+  return null;
+}
+
 function useStages(): { stages: Stage[]; loading: boolean } {
   const [stages, setStages] = useState<Stage[]>(STAGES_SKELETON);
   const [loading, setLoading] = useState(true);
@@ -153,7 +164,7 @@ export function KanbanBoard({ onLeadClick }: { onLeadClick?: (lead: UiLead) => v
   const [error, setError] = useState<string | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dragOverStage, setDragOverStage] = useState<string | null>(null);
-  const [dispatchOpen, setDispatchOpen] = useState(false);
+  const [dispatchStage, setDispatchStage] = useState<Stage | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
 
   useEffect(() => {
@@ -323,20 +334,25 @@ export function KanbanBoard({ onLeadClick }: { onLeadClick?: (lead: UiLead) => v
           onDrop={handleDrop}
           dragOverStage={dragOverStage}
           onDispatchClick={
-            ["lead_qualificado", "lead_contatado", "novo"].includes(stage.id)
-              ? () => setDispatchOpen(true)
+            dispatchStagesFor(stage.id)
+              ? () => setDispatchStage(stage)
               : undefined
           }
         />
       ))}
-      <DispatchModal
-        open={dispatchOpen}
-        eligibleCount={leads.filter((l) =>
-          ["lead_qualificado", "lead_contatado", "novo"].includes(l.stage)
-        ).length}
-        onClose={() => setDispatchOpen(false)}
-        onDispatched={() => setRefreshTick((t) => t + 1)}
-      />
+      {dispatchStage && (() => {
+        const targetStages = dispatchStagesFor(dispatchStage.id) ?? [];
+        return (
+          <DispatchModal
+            open
+            stages={targetStages}
+            stageLabel={dispatchStage.label}
+            eligibleCount={leads.filter((l) => targetStages.includes(l.stage)).length}
+            onClose={() => setDispatchStage(null)}
+            onDispatched={() => setRefreshTick((t) => t + 1)}
+          />
+        );
+      })()}
     </div>
   );
 }
