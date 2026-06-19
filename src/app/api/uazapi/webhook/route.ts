@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { resumeHook } from "workflow/api";
+import { randomUUID } from "crypto";
+import { resumeHook, start } from "workflow/api";
+import { leadQualificationWorkflow } from "../../../../workflows/lead-qualification";
 import { createServiceClient } from "../../../../lib/supabase";
 import { redactWhatsapp } from "../../../../lib/redact";
 import { isPhoneAllowed, normalizeBrPhone } from "../../../../lib/phone-whitelist";
@@ -178,6 +180,39 @@ export async function POST(req: NextRequest) {
     }
   );
 
+  // Reinicia um workflow morto para retomar a conversa. O workflow reiniciado
+  // pula a abertura (lead não está em stage inicial) e responde a mensagem pendente,
+  // que já foi gravada em messages_received acima — por isso não precisamos
+  // reentregá-la via hook (evita race entre start e createHook).
+  const activeLead = lead; // narrowed non-undefined pelo guard acima; preserva o tipo na closure
+  async function restartWorkflow(): Promise<void> {
+    const newToken = `lead:${activeLead.id}:inbound:${randomUUID()}`;
+    await supabase
+      .from("applications")
+      .update({ hook_token: newToken, workflow_run_id: null })
+      .eq("id", activeLead.id);
+    const run = await start(leadQualificationWorkflow, [activeLead.id, newToken]);
+    await supabase
+      .from("applications")
+      .update({ workflow_run_id: run.runId })
+      .eq("id", activeLead.id);
+    console.log("uazapi.webhook: restarted workflow", { leadId: activeLead.id, runId: run.runId });
+  }
+
+  const hasActiveRun = !!(activeLead as { workflow_run_id?: string | null }).workflow_run_id;
+
+  // Sem run ativo → o workflow terminou (MAX_TURNS, crash ou nunca iniciado).
+  // Reinicia direto em vez de tentar resumeHook num hook inexistente.
+  if (!hasActiveRun) {
+    try {
+      await restartWorkflow();
+      return NextResponse.json({ ok: true, restarted: true });
+    } catch (err) {
+      console.error("restartWorkflow failed", { leadId: lead.id, err: String(err) });
+      return NextResponse.json({ error: "restart failed" }, { status: 500 });
+    }
+  }
+
   // Resume workflow — usa hook_token único por run (evita rotear para workflow zumbi)
   const token = (lead as { hook_token?: string | null }).hook_token || `lead:${lead.id}:inbound`;
   try {
@@ -187,7 +222,14 @@ export async function POST(req: NextRequest) {
     });
     return NextResponse.json({ ok: true });
   } catch (err) {
-    console.error("resumeHook failed", { leadId: lead.id, token, err: String(err) });
-    return NextResponse.json({ error: "resume failed" }, { status: 500 });
+    // Hook não existe mais (workflow_run_id obsoleto) → reinicia o workflow.
+    console.warn("resumeHook failed — restarting workflow", { leadId: lead.id, token, err: String(err) });
+    try {
+      await restartWorkflow();
+      return NextResponse.json({ ok: true, restarted: true });
+    } catch (err2) {
+      console.error("restartWorkflow failed", { leadId: lead.id, err: String(err2) });
+      return NextResponse.json({ error: "resume+restart failed" }, { status: 500 });
+    }
   }
 }

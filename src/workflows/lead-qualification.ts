@@ -25,17 +25,20 @@ async function autoAdvanceIfStuck(
 ): Promise<void> {
   "use step";
 
-  // turnsInStage = reply_count total do lead (proxy confiável, cresce a cada mensagem recebida).
-  // Regras: [etapa_atual, reply_count_mínimo, próxima_etapa]
+  // turnsInStage = nº de turnos do lead NA ETAPA ATUAL (reseta a cada mudança de stage).
+  // NÃO é o reply_count cumulativo — isso evita avançar por engano um lead que só
+  // acumulou respostas progredindo por etapas anteriores.
+  // Regras: [etapa_atual, turnos_mínimos_na_etapa, próxima_etapa]
   const rules: Array<[string, number, string]> = [
-    // Lead Contatado: respondeu mas Sofia não avançou em 2 turnos → Respondeu
-    ["lead_contatado", 2, "respondeu"],
+    // Lead Contatado: basta o lead responder 1x → Respondeu (qualificação real é lá, com sonnet).
+    // Não dependemos do haiku chamar mover_para_respondeu; o avanço é determinístico.
+    ["lead_contatado", 1, "respondeu"],
     // Respondeu: 4+ respostas sem qualificar → Aquecendo
     ["respondeu", 4, "aquecendo"],
     // Aquecendo: 8+ respostas sem agendar → Contato Futuro
     ["aquecendo", 8, "contato_futuro"],
     // Legados
-    ["followup_1", 2, "respondeu"],
+    ["followup_1", 1, "respondeu"],
     ["diagnostico", 4, "aquecendo"],
     ["contato_respondido_pela_ia", 5, "aquecendo"],
   ];
@@ -64,7 +67,10 @@ async function autoAdvanceIfStuck(
 
 type IncomingMessage = { text: string; timestamp: number };
 
-const MAX_TURNS = 12;
+// Teto de iterações por run do workflow. Conversas longas (objeção + agendamento)
+// passam fácil de 12; ao atingir o teto o workflow encerra e o webhook reinicia
+// um novo run na próxima mensagem (ver api/uazapi/webhook).
+const MAX_TURNS = 40;
 
 export async function leadQualificationWorkflow(leadId: string, hookToken?: string) {
   "use workflow";
@@ -72,24 +78,35 @@ export async function leadQualificationWorkflow(leadId: string, hookToken?: stri
   const lead = await getLead(leadId);
   if (!lead) throw new FatalError(`Application ${leadId} não existe`);
 
-  // Etapa 1: mensagem de abertura
-  // Se o lead tem mensagem_sugerida, envia diretamente (sem IA).
-  // Caso contrário, o agente de stage gera a abertura.
+  // Etapa 1: abertura (lead em stage inicial) OU retomada (workflow reiniciado).
   // IDs de entrada válidos: lead_qualificado (migration 002) e novo (legado migration 007)
   const INITIAL_STAGES = ["lead_qualificado", "novo"];
-  if (lead.mensagem_sugerida && INITIAL_STAGES.includes(lead.crm_stage)) {
-    await sendFirstMessage(leadId, lead.mensagem_sugerida);
-  } else {
-    const nomeAbertura = lead.nome_para_mensagem ?? lead.full_name.split(" ")[0];
-    const kickstart: ModelMessage[] = [
-      { role: "user", content: `[Novo lead cadastrado — envie a mensagem de abertura para ${nomeAbertura}]` },
-    ];
-    await salusTurn(leadId, lead, kickstart);
-  }
-  // Avança para "Lead Contatado" — indica que a mensagem foi enviada.
-  // A Sofia só moverá para "Respondeu" quando o lead REALMENTE responder.
   if (INITIAL_STAGES.includes(lead.crm_stage)) {
+    // Lead novo: envia abertura (mensagem_sugerida ou gerada pela IA) e avança o stage.
+    if (lead.mensagem_sugerida) {
+      await sendFirstMessage(leadId, lead.mensagem_sugerida);
+    } else {
+      const nomeAbertura = lead.nome_para_mensagem ?? lead.full_name.split(" ")[0];
+      const kickstart: ModelMessage[] = [
+        { role: "user", content: `[Novo lead cadastrado — envie a mensagem de abertura para ${nomeAbertura}]` },
+      ];
+      await salusTurn(leadId, lead, kickstart);
+    }
+    // Avança para "Lead Contatado" — a Sofia só moverá para "Respondeu" quando o lead responder.
     await updateLeadStatus(leadId, "lead_contatado");
+  } else if (!lead.ai_paused && !AI_DISABLED_STAGES.has(lead.crm_stage)) {
+    // Retomada: o webhook reiniciou um workflow morto. NÃO reenviar abertura —
+    // responder imediatamente a mensagem pendente (já gravada em messages_received)
+    // antes de entrar no loop de hook.
+    const history = await getConversationHistory(leadId);
+    const messages: ModelMessage[] = history.map((m) => ({
+      role: m.direction === "in" ? ("user" as const) : ("assistant" as const),
+      content: m.content,
+    }));
+    await salusTurn(leadId, lead, messages, lead.reply_count);
+    // Primeiro turno nesta etapa neste run → 1 (não cumulativo). Garante o avanço
+    // determinístico de lead_contatado (threshold 1) sem disparar etapas posteriores.
+    await autoAdvanceIfStuck(leadId, lead.crm_stage, 1);
   }
 
   // Etapa 2: hook iterável para respostas — token único por run evita HookConflictError
@@ -98,6 +115,12 @@ export async function leadQualificationWorkflow(leadId: string, hookToken?: stri
 
   // Etapa 3: loop de conversa com prompt-swap por stage
   let turnos = 0;
+  // Conta turnos NA ETAPA ATUAL (reseta a cada mudança de stage). O backstop
+  // determinístico usa ESTE valor, não o reply_count cumulativo — senão um lead
+  // que progrediu por várias etapas atinge os thresholds e é avançado por engano
+  // (ex: aquecendo→contato_futuro no meio do agendamento).
+  let lastStage: string | null = null;
+  let turnsInCurrentStage = 0;
 
   for await (const msg of inboundHook) {
     if (msg?.text) await classifySentiment(leadId, msg.text);
@@ -120,23 +143,27 @@ export async function leadQualificationWorkflow(leadId: string, hookToken?: stri
       continue;
     }
 
-    const history = await getConversationHistory(leadId);
+    // Contador por etapa: reseta quando o lead muda de stage.
+    if (freshLead.crm_stage !== lastStage) {
+      lastStage = freshLead.crm_stage;
+      turnsInCurrentStage = 0;
+    }
+    turnsInCurrentStage++;
 
-    // reply_count é incrementado pelo webhook a cada resposta do lead (confiável e sem query extra)
-    const turnsInStage = freshLead.reply_count;
+    const history = await getConversationHistory(leadId);
 
     const messages: ModelMessage[] = history.map((m) => ({
       role: m.direction === "in" ? ("user" as const) : ("assistant" as const),
       content: m.content,
     }));
 
-    // salusTurn usa o crm_stage atual do lead para escolher prompt + modelo
-    await salusTurn(leadId, freshLead, messages, turnsInStage);
+    // salusTurn recebe o reply_count cumulativo como contexto do prompt (inalterado).
+    await salusTurn(leadId, freshLead, messages, freshLead.reply_count);
 
     // ── Mecanismo de backup determinístico ────────────────────────────────
-    // Se a Sofia não chamou nenhuma ferramenta de promoção após N respostas
-    // do lead, o sistema avança o stage automaticamente sem depender da IA.
-    await autoAdvanceIfStuck(leadId, freshLead.crm_stage, turnsInStage);
+    // Se a Sofia não chamou nenhuma ferramenta de promoção após N turnos NESTA
+    // etapa, o sistema avança o stage automaticamente sem depender da IA.
+    await autoAdvanceIfStuck(leadId, freshLead.crm_stage, turnsInCurrentStage);
 
     turnos++;
     if (turnos >= MAX_TURNS) {
