@@ -6,11 +6,18 @@ import { createServiceClient } from "../../lib/supabase";
 const TYPING_DELAY_MS = 5_000;
 
 /**
- * Normalizes Brazilian phone format to digits-only expected by Uazapi.
- * Accepts: "(11) 99988-7766", "+5511999887766", "11999887766", "5511999887766".
+ * Normalizes a phone to the digits-only form expected by Uazapi.
+ * Números em E.164 (com "+") já trazem o código do país (US "+1...", BR "+55...")
+ * e são usados como estão — NUNCA prefixar 55. Só aplica heurística brasileira
+ * para entradas legadas sem "+".
+ * Aceita: "+17863281653", "+5511999887766", "(11) 99988-7766", "11999887766".
  */
 function normalizePhone(raw: string): string {
-  const digits = raw.replace(/\D/g, "");
+  const trimmed = (raw ?? "").trim();
+  const digits = trimmed.replace(/\D/g, "");
+  // E.164 (com +): já tem código de país — confia no número.
+  if (trimmed.startsWith("+")) return digits;
+  // Sem "+": assume número brasileiro (comportamento legado).
   if (digits.length === 11) return "55" + digits;
   if (digits.length === 13 && digits.startsWith("55")) return digits;
   if (digits.length >= 10) return digits.startsWith("55") ? digits : "55" + digits;
