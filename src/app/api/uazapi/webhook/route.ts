@@ -27,6 +27,7 @@ export async function POST(req: NextRequest) {
 
   const data = payload as {
     event?: string;
+    chat?: { name?: string };
     message?: {
       id?: string;
       from?: string;
@@ -37,6 +38,9 @@ export async function POST(req: NextRequest) {
       chatid?: string;
       type?: string;
       wasSentByApi?: boolean;
+      senderName?: string;
+      pushName?: string;
+      notifyName?: string;
     };
   };
 
@@ -65,6 +69,11 @@ export async function POST(req: NextRequest) {
 
   if (!whatsappRaw || !text) {
     return NextResponse.json({ ok: true, ignored: "missing from/text" });
+  }
+
+  // Ignora mensagens de grupo — nunca criar/responder lead a partir de um grupo.
+  if (whatsappRaw.includes("@g.us") || (msg.chatid ?? "").includes("@g.us")) {
+    return NextResponse.json({ ok: true, ignored: "group message" });
   }
 
   const cleaned = whatsappRaw.includes("@") ? whatsappRaw.split("@")[0] : whatsappRaw;
@@ -106,8 +115,81 @@ export async function POST(req: NextRequest) {
 
   const lead = (candidates ?? []).find((a) => normalizeBrPhone(a.phone) === canonical);
   if (!lead) {
-    console.log("uazapi.webhook: no active lead", { phone: redactWhatsapp(digits), fromMe: msg.fromMe });
-    return NextResponse.json({ ok: true, ignored: "no active lead" });
+    // Número desconhecido. Se for mensagem de ENTRADA (lead → nós), cria o lead e
+    // deixa a Sofia responder automaticamente — sem precisar de disparo. Responder
+    // a quem te chamou está dentro da janela de 24h do WhatsApp (não conta como
+    // "iniciar nova conversa", então funciona mesmo sob reachout timelock).
+    // fromMe=true sem lead = saída manual pra fora do CRM → ignora.
+    if (msg.fromMe) {
+      console.log("uazapi.webhook: no active lead (fromMe outbound) — ignoring", { phone: redactWhatsapp(digits) });
+      return NextResponse.json({ ok: true, ignored: "no active lead (fromMe)" });
+    }
+
+    const phoneE164 = `+${digits}`;
+    const senderName =
+      (msg.senderName ?? msg.pushName ?? msg.notifyName ?? data.chat?.name ?? "").trim() ||
+      `Contato WhatsApp ${digits.slice(-4)}`;
+    const newToken = `lead:inbound:${randomUUID()}`;
+
+    // Cria já em "respondeu": o lead iniciou a conversa, então vai direto para a
+    // qualificação (Sonnet), sem mensagem de abertura.
+    const { data: created, error: createErr } = await supabase
+      .from("applications")
+      .insert({
+        full_name: senderName,
+        nome_para_mensagem: senderName.split(" ")[0],
+        phone: phoneE164,
+        crm_stage: "respondeu",
+        do_not_contact: false,
+        reply_count: 0,
+        hook_token: newToken,
+        qualification_notes: JSON.stringify({ origem_principal: "inbound_whatsapp" }),
+      })
+      .select("id")
+      .single();
+
+    if (createErr || !created) {
+      console.error("uazapi.webhook: failed to create inbound lead", { phone: redactWhatsapp(digits), err: createErr?.message });
+      return NextResponse.json({ error: "create lead failed" }, { status: 500 });
+    }
+    const newLeadId = created.id as string;
+
+    // Idempotência + grava a mensagem recebida (entra no histórico que a Sofia lê)
+    if (uazapiId) {
+      await supabase.from("processed_uazapi_crm_messages")
+        .insert({ uazapi_id: uazapiId, application_id: newLeadId })
+        .then(undefined, () => {});
+    }
+    await supabase.from("messages_received").insert({
+      application_id: newLeadId,
+      uazapi_message_id: uazapiId || `manual-${Date.now()}`,
+      chatid: msg.chatid ?? whatsappRaw,
+      numero: digits,
+      texto: text,
+      message_type: msg.type ?? "text",
+      received_at: msg.timestamp ? new Date(msg.timestamp * 1000).toISOString() : new Date().toISOString(),
+      raw_payload: data as Record<string, unknown>,
+    }).then(undefined, (err) => console.warn("messages_received insert failed (new inbound lead)", String(err)));
+
+    await supabase.rpc("increment_reply_count", { app_id: newLeadId }).then(
+      undefined,
+      async () => {
+        await supabase.from("applications")
+          .update({ replied_at: new Date().toISOString(), last_reply_text: text })
+          .eq("id", newLeadId);
+      },
+    );
+
+    // Inicia o workflow — o branch de retomada responde à mensagem pendente (sem abertura).
+    try {
+      const run = await start(leadQualificationWorkflow, [newLeadId, newToken]);
+      await supabase.from("applications").update({ workflow_run_id: run.runId }).eq("id", newLeadId);
+      console.log("uazapi.webhook: created inbound lead + started workflow", { newLeadId, name: senderName, runId: run.runId });
+      return NextResponse.json({ ok: true, created: true, leadId: newLeadId });
+    } catch (err) {
+      console.error("uazapi.webhook: start workflow failed for inbound lead", { newLeadId, err: String(err) });
+      return NextResponse.json({ error: "start workflow failed" }, { status: 500 });
+    }
   }
 
   // Register idempotency
