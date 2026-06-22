@@ -80,6 +80,22 @@ function logEvent(
     .then(undefined, (err) => console.warn("ai_events insert failed", String(err)));
 }
 
+/**
+ * Ordem do funil. Usado para bloquear retrocessos indevidos: o modelo às vezes
+ * chama mover_para_respondeu estando em aquecendo, fazendo a etapa "piscar".
+ * Etapas fora do mapa (contato_futuro, fechado, perdido, descartado) são
+ * parques/terminais e nunca são bloqueadas.
+ */
+const STAGE_RANK: Record<string, number> = {
+  lead_qualificado: 0, novo: 0,
+  lead_contatado: 1, followup_1: 1,
+  respondeu: 2, diagnostico: 2, contato_respondido_pela_ia: 2,
+  aquecendo: 3, em_contato: 3,
+  objecao: 3, negociacao: 3,
+  agendado: 4, agendamento: 4, visita_tecnica: 4, ligacao_agendada: 4, call_agendada: 4,
+  pos_visita: 5, proposta_enviada: 5,
+};
+
 /** Atualiza crm_stage no banco, pausa IA se necessário e loga a transição */
 async function transitionStage(
   leadId: string,
@@ -87,6 +103,17 @@ async function transitionStage(
   nextStage: string,
   pauseAi = false,
 ) {
+  // Guard anti-retrocesso: nunca voltar para uma etapa de qualificação inicial
+  // (respondeu/lead_contatado) vinda de uma etapa posterior. Permite recuos
+  // legítimos (ex: agendado → aquecendo quando o lead desiste de agendar).
+  const fromRank = STAGE_RANK[fromStage];
+  const toRank = STAGE_RANK[nextStage];
+  if (fromRank !== undefined && toRank !== undefined && toRank < fromRank && toRank <= 2) {
+    console.warn("transitionStage: retrocesso bloqueado", { leadId, fromStage, nextStage });
+    logEvent(leadId, "stage_transition_blocked", fromStage, { attempted: nextStage, reason: "backward_to_qualification" });
+    return;
+  }
+
   const supabase = createServiceClient();
   const patch: Record<string, unknown> = { crm_stage: nextStage };
   if (pauseAi) {
@@ -276,22 +303,23 @@ TAGS PREDEFINIDAS (use quando encaixar):
   });
 
   const mover_para_agendado = tool({
-    description: "Move lead para Agendado. Use APENAS quando lead confirmou DIA + HORÁRIO + ENDEREÇO. Todos os três campos são obrigatórios. Se souber a data/hora em formato ISO (ex: '2026-06-13T14:00:00'), passe em datetime_iso — será usado para verificar e criar o evento no Google Calendar.",
+    description: "Move o lead para Agendado assim que ele confirmar DIA + HORÁRIO (intenção clara de receber a visita). NÃO exija endereço para mover — o endereço e os demais itens (quem recebe, animal, torneiras) são coletados JÁ na etapa Agendado. Se souber a data/hora em ISO (ex: '2026-06-13T14:00:00'), passe em datetime_iso para o Google Calendar.",
     inputSchema: z.object({
-      data_visita:    z.string().describe("Data confirmada pelo lead, ex: 'sexta dia 13 de junho'"),
-      horario_visita: z.string().describe("Horário confirmado pelo lead, ex: '14h'"),
-      local_visita:   z.string().describe("Endereço completo ou modalidade, ex: '123 SW 8th St, Miami'"),
+      data_visita:    z.string().describe("Data confirmada pelo lead, ex: 'quinta dia 13'"),
+      horario_visita: z.string().describe("Horário confirmado pelo lead, ex: '11h'"),
+      local_visita:   z.string().optional().describe("Endereço, se o lead já informou. Opcional — pode coletar na etapa Agendado."),
       datetime_iso:   z.string().optional().describe("Data e hora em ISO 8601, ex: '2026-06-13T14:00:00' — para integração com Google Calendar"),
     }),
-    execute: async ({ data_visita, horario_visita, local_visita, datetime_iso }: { data_visita: string; horario_visita: string; local_visita: string; datetime_iso?: string }) => {
-      if (!data_visita.trim() || !horario_visita.trim() || !local_visita.trim()) {
-        return { ok: false, reason: "Agendamento incompleto — necessário: data + horário + endereço confirmados pelo lead." };
+    execute: async ({ data_visita, horario_visita, local_visita = "", datetime_iso }: { data_visita: string; horario_visita: string; local_visita?: string; datetime_iso?: string }) => {
+      if (!data_visita.trim() || !horario_visita.trim()) {
+        return { ok: false, reason: "Para mover ao Agendado, confirme ao menos DIA + HORÁRIO com o lead." };
       }
 
       let calendarEventLink: string | null = null;
 
-      // Verificar disponibilidade e criar evento no Google Calendar (se configurado e datetime_iso fornecido)
-      if (datetime_iso) {
+      // Cria o evento no Google Calendar só com data/hora ISO E endereço (na etapa Agendado).
+      // No move antecipado vindo de aquecendo (sem endereço) o evento não é criado ainda.
+      if (datetime_iso && local_visita.trim()) {
         try {
           const gcalCfg = await getGoogleCalendarConfig();
           if (gcalCfg) {

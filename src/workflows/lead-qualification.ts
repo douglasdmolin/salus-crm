@@ -1,4 +1,4 @@
-import { createHook, FatalError } from "workflow";
+import { createHook, FatalError, sleep } from "workflow";
 import type { ModelMessage } from "ai";
 import { getLead, updateLeadStatus, getConversationHistory } from "./steps/supabase";
 import { salusTurn } from "./steps/salus-turn";
@@ -33,10 +33,11 @@ async function autoAdvanceIfStuck(
     // Lead Contatado: basta o lead responder 1x → Respondeu (qualificação real é lá, com sonnet).
     // Não dependemos do haiku chamar mover_para_respondeu; o avanço é determinístico.
     ["lead_contatado", 1, "respondeu"],
-    // Respondeu: 4+ respostas sem qualificar → Aquecendo
-    ["respondeu", 4, "aquecendo"],
-    // Aquecendo: 8+ respostas sem agendar → Contato Futuro
-    ["aquecendo", 8, "contato_futuro"],
+    // Respondeu: basta 2 turnos sem qualificar → Aquecendo (avança rápido; não prende o lead)
+    ["respondeu", 2, "aquecendo"],
+    // Aquecendo: só vira contato_futuro depois de MUITO tempo sem agendar (12 turnos).
+    // Antes era 8 e parkava lead engajado que estava prestes a marcar a visita.
+    ["aquecendo", 12, "contato_futuro"],
     // Legados
     ["followup_1", 1, "respondeu"],
     ["diagnostico", 4, "aquecendo"],
@@ -72,13 +73,38 @@ type IncomingMessage = { text: string; timestamp: number };
 // um novo run na próxima mensagem (ver api/uazapi/webhook).
 const MAX_TURNS = 40;
 
+// Janela de agregação de mensagens em rajada (segundos). Quando o lead manda
+// várias mensagens seguidas, só a última dispara uma resposta — evita a Sofia
+// responder cada fragmento separadamente (respostas duplicadas).
+const DEBOUNCE_SECONDS = 6;
+
+/** Epoch ms da última mensagem recebida do lead (usado pelo debounce). */
+async function latestInboundAtMs(leadId: string): Promise<number> {
+  "use step";
+  const supabase = createServiceClient();
+  const { data } = await supabase
+    .from("messages_received")
+    .select("received_at")
+    .eq("application_id", leadId)
+    .order("received_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return data?.received_at ? new Date(data.received_at as string).getTime() : 0;
+}
+
 export async function leadQualificationWorkflow(leadId: string, hookToken?: string) {
   "use workflow";
 
   const lead = await getLead(leadId);
   if (!lead) throw new FatalError(`Application ${leadId} não existe`);
 
-  // Etapa 1: abertura (lead em stage inicial) OU retomada (workflow reiniciado).
+  // Hook criado ANTES de qualquer resposta: mensagens que chegam durante o primeiro
+  // turno ficam no buffer e são tratadas pelo loop — evita o webhook reiniciar um
+  // run concorrente (que gerava respostas duplicadas).
+  const token = hookToken ?? `lead:${leadId}:inbound`;
+  const inboundHook = createHook<IncomingMessage>({ token });
+
+  // Etapa 1: abertura (lead em stage inicial) OU retomada (workflow reiniciado/inbound).
   // IDs de entrada válidos: lead_qualificado (migration 002) e novo (legado migration 007)
   const INITIAL_STAGES = ["lead_qualificado", "novo"];
   if (INITIAL_STAGES.includes(lead.crm_stage)) {
@@ -95,23 +121,21 @@ export async function leadQualificationWorkflow(leadId: string, hookToken?: stri
     // Avança para "Lead Contatado" — a Sofia só moverá para "Respondeu" quando o lead responder.
     await updateLeadStatus(leadId, "lead_contatado");
   } else if (!lead.ai_paused && !AI_DISABLED_STAGES.has(lead.crm_stage)) {
-    // Retomada: o webhook reiniciou um workflow morto. NÃO reenviar abertura —
-    // responder imediatamente a mensagem pendente (já gravada em messages_received)
-    // antes de entrar no loop de hook.
-    const history = await getConversationHistory(leadId);
-    const messages: ModelMessage[] = history.map((m) => ({
-      role: m.direction === "in" ? ("user" as const) : ("assistant" as const),
-      content: m.content,
-    }));
-    await salusTurn(leadId, lead, messages, lead.reply_count);
-    // Primeiro turno nesta etapa neste run → 1 (não cumulativo). Garante o avanço
-    // determinístico de lead_contatado (threshold 1) sem disparar etapas posteriores.
-    await autoAdvanceIfStuck(leadId, lead.crm_stage, 1);
+    // Retomada/inbound: responde à mensagem pendente — mas com debounce, pra não
+    // responder no meio de uma rajada (se chegar mais nova, o loop responde a última).
+    const refMs = await latestInboundAtMs(leadId);
+    await sleep(`${DEBOUNCE_SECONDS}s`);
+    if ((await latestInboundAtMs(leadId)) <= refMs) {
+      const history = await getConversationHistory(leadId);
+      const messages: ModelMessage[] = history.map((m) => ({
+        role: m.direction === "in" ? ("user" as const) : ("assistant" as const),
+        content: m.content,
+      }));
+      await salusTurn(leadId, lead, messages, lead.reply_count);
+      // Primeiro turno nesta etapa neste run → 1 (não cumulativo).
+      await autoAdvanceIfStuck(leadId, lead.crm_stage, 1);
+    }
   }
-
-  // Etapa 2: hook iterável para respostas — token único por run evita HookConflictError
-  const token = hookToken ?? `lead:${leadId}:inbound`;
-  const inboundHook = createHook<IncomingMessage>({ token });
 
   // Etapa 3: loop de conversa com prompt-swap por stage
   let turnos = 0;
@@ -123,6 +147,13 @@ export async function leadQualificationWorkflow(leadId: string, hookToken?: stri
   let turnsInCurrentStage = 0;
 
   for await (const msg of inboundHook) {
+    // Debounce: junta mensagens em rajada. refMs = horário DESTA mensagem; se uma
+    // mais nova chegar durante a espera, pula esta e deixa a última responder.
+    const tsRaw = msg?.timestamp ?? 0;
+    const refMs = tsRaw === 0 ? Date.now() : tsRaw < 1e12 ? tsRaw * 1000 : tsRaw;
+    await sleep(`${DEBOUNCE_SECONDS}s`);
+    if ((await latestInboundAtMs(leadId)) > refMs) continue;
+
     if (msg?.text) await classifySentiment(leadId, msg.text);
 
     let freshLead = await getLead(leadId);
