@@ -4,10 +4,14 @@ import { DEFAULT_AI_PROMPT_TEMPLATE } from "../config/project";
 export type UazapiConfig = { url: string; token: string; instance: string };
 
 /**
- * Reads uazapi_url, uazapi_token, uazapi_instance from crm_config,
- * falling back to env vars. Returns null if url or token are missing.
+ * Reads the uazapi connection config. The base URL é compartilhada entre todas as
+ * instâncias; o TOKEN é o que muda por número de WhatsApp.
+ *
+ * - Sem `instanceId`: usa o token global (crm_config.uazapi_token / env) — modo 1-número.
+ * - Com `instanceId`: usa o token da instância correspondente em `whatsapp_instances`
+ *   (multi-número). Faz fallback para o global se a instância não existir/estiver inativa.
  */
-export async function getUazapiConfig(): Promise<UazapiConfig | null> {
+export async function getUazapiConfig(instanceId?: string | null): Promise<UazapiConfig | null> {
   const supabase = createServiceClient();
   const { data } = await supabase
     .from("crm_config")
@@ -15,11 +19,37 @@ export async function getUazapiConfig(): Promise<UazapiConfig | null> {
     .in("key", ["uazapi_url", "uazapi_token", "uazapi_instance"]);
 
   const map = new Map((data ?? []).map((r) => [r.key as string, r.value as string]));
-  const url      = map.get("uazapi_url")      || process.env.UAZAPI_URL;
-  const token    = map.get("uazapi_token")    || process.env.UAZAPI_TOKEN;
-  const instance = map.get("uazapi_instance") || process.env.UAZAPI_INSTANCE || "";
+  let url        = map.get("uazapi_url")      || process.env.UAZAPI_URL;
+  let token      = map.get("uazapi_token")    || process.env.UAZAPI_TOKEN;
+  let instance   = map.get("uazapi_instance") || process.env.UAZAPI_INSTANCE || "";
+
+  if (instanceId) {
+    const { data: inst } = await supabase
+      .from("whatsapp_instances")
+      .select("uazapi_token, uazapi_url, name, active")
+      .eq("id", instanceId)
+      .maybeSingle();
+    if (inst?.active && inst.uazapi_token) {
+      token = inst.uazapi_token as string;
+      instance = (inst.name as string) || instance;
+      // Cada instância pode estar em um servidor uazapi diferente.
+      if (inst.uazapi_url) url = inst.uazapi_url as string;
+    }
+  }
+
   if (!url || !token) return null;
   return { url, token, instance };
+}
+
+/** IDs das instâncias de WhatsApp ativas, em ordem — usado no round-robin do disparo. */
+export async function listActiveInstanceIds(): Promise<string[]> {
+  const supabase = createServiceClient();
+  const { data } = await supabase
+    .from("whatsapp_instances")
+    .select("id")
+    .eq("active", true)
+    .order("id", { ascending: true });
+  return (data ?? []).map((r) => r.id as string);
 }
 
 /**

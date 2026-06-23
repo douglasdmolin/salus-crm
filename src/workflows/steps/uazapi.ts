@@ -31,14 +31,12 @@ function normalizePhone(raw: string): string {
  */
 export async function sendWhatsapp(leadId: string, message: string): Promise<string> {
   "use step";
-  const uazapi = await getUazapiConfig();
-  if (!uazapi) throw new Error("Uazapi não configurado — defina URL e Token nas Configurações do CRM");
   const supabase = createServiceClient();
 
-  // Fetch lead directly (no step wrapping — we are inside a step already)
+  // Busca o lead primeiro — precisamos do whatsapp_instance_id para escolher o número de envio.
   const { data: lead, error: leadErr } = await supabase
     .from("applications")
-    .select("id, phone, do_not_contact, full_name")
+    .select("id, phone, do_not_contact, full_name, whatsapp_instance_id")
     .eq("id", leadId)
     .maybeSingle();
 
@@ -46,6 +44,10 @@ export async function sendWhatsapp(leadId: string, message: string): Promise<str
     console.error("sendWhatsapp: lead not found", { leadId, err: leadErr?.message });
     throw new Error(`Application ${leadId} not found: ${leadErr?.message ?? "no row"}`);
   }
+
+  // Resolve a instância do lead (multi-número). Sem instância → token global (modo 1-número).
+  const uazapi = await getUazapiConfig((lead as { whatsapp_instance_id?: string | null }).whatsapp_instance_id);
+  if (!uazapi) throw new Error("Uazapi não configurado — defina URL e Token nas Configurações do CRM");
 
   if (lead.do_not_contact) {
     console.log("sendWhatsapp: skipped (do_not_contact)", { leadId });

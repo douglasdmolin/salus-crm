@@ -3,6 +3,7 @@ import { start } from "workflow/api";
 import { dispatchBatchWorkflow } from "../../../../workflows/dispatch-batch";
 import { createServiceClient } from "../../../../lib/supabase";
 import { isPhoneAllowedRuntime } from "../../../../lib/phone-whitelist";
+import { listActiveInstanceIds } from "../../../../lib/crm-config";
 
 const ALLOWED_BATCH_SIZES = [10, 20, 30] as const;
 const ALLOWED_INTERVALS = [30, 60, 90] as const;
@@ -71,6 +72,21 @@ export async function POST(req: NextRequest) {
   }
 
   const leadIds = eligible.map((l) => l.id);
+
+  // Distribuição round-robin entre os números de WhatsApp ativos (multi-número).
+  // Cada lead "fica" no número que o disparou — respostas saem pelo mesmo.
+  // Sem instâncias configuradas → não atribui (usa o token global, modo 1-número).
+  const instanceIds = await listActiveInstanceIds();
+  if (instanceIds.length > 0) {
+    await Promise.all(
+      eligible.map((l, i) =>
+        supabase
+          .from("applications")
+          .update({ whatsapp_instance_id: instanceIds[i % instanceIds.length] })
+          .eq("id", l.id),
+      ),
+    );
+  }
 
   try {
     const run = await start(dispatchBatchWorkflow, [{ leadIds, intervalSeconds }]);

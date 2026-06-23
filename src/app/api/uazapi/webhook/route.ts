@@ -28,6 +28,14 @@ export async function POST(req: NextRequest) {
   const data = payload as {
     event?: string;
     chat?: { name?: string };
+    // Número/instância que RECEBEU a mensagem (multi-número). No uazapi, o campo
+    // principal é "owner" (seu número conectado) ou "session".
+    owner?: string;
+    session?: string;
+    connectedPhone?: string;
+    me?: string;
+    instance?: string;
+    instanceId?: string;
     message?: {
       id?: string;
       from?: string;
@@ -41,6 +49,8 @@ export async function POST(req: NextRequest) {
       senderName?: string;
       pushName?: string;
       notifyName?: string;
+      to?: string;
+      me?: string;
     };
   };
 
@@ -78,6 +88,16 @@ export async function POST(req: NextRequest) {
 
   const cleaned = whatsappRaw.includes("@") ? whatsappRaw.split("@")[0] : whatsappRaw;
   const digits = cleaned.replace(/\D/g, "");
+
+  // Número que RECEBEU a mensagem = identificador da instância (multi-número).
+  // No uazapi vem em "owner" (número conectado) ou "session". Mapeado para
+  // whatsapp_instances.id (guardado como os dígitos do número).
+  // Sem número identificável → null (cai no token global, modo 1-número).
+  const receivingRaw = String(
+    data.owner ?? data.session ?? data.connectedPhone ?? data.me ?? msg.to ?? msg.me ?? data.instanceId ?? data.instance ?? "",
+  );
+  const receivingDigits = receivingRaw.replace(/\D/g, "");
+  const receivingInstanceId = receivingDigits.length >= 10 ? receivingDigits : null;
 
   if (!isPhoneAllowed(digits)) {
     console.log("uazapi.webhook: phone not whitelisted, ignoring", { phone: redactWhatsapp(digits) });
@@ -144,6 +164,8 @@ export async function POST(req: NextRequest) {
         reply_count: 0,
         hook_token: newToken,
         qualification_notes: JSON.stringify({ origem_principal: "inbound_whatsapp" }),
+        // Número (instância) que recebeu a mensagem — as respostas saem por este mesmo.
+        whatsapp_instance_id: receivingInstanceId,
       })
       .select("id")
       .single();

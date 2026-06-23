@@ -54,6 +54,8 @@ type AnthropicCredits = {
   error?: string;
 };
 
+type WaInstance = { id: string; name: string; uazapi_url: string; active: boolean; token_set: boolean; created_at: string };
+
 export default function ConfigPage() {
   const [cfg, setCfg] = useState<ConfigResponse | null>(null);
   const [prompt, setPrompt] = useState("");
@@ -73,11 +75,15 @@ export default function ConfigPage() {
   const [uazapiUrl, setUazapiUrl] = useState("");
   const [uazapiInstance, setUazapiInstance] = useState("");
   const [uazapiToken, setUazapiToken] = useState("");
-  const [uazapiTokenSet, setUazapiTokenSet] = useState(false);
-  const [showUazapiToken, setShowUazapiToken] = useState(false);
   const [notificationPhone, setNotificationPhone] = useState("");
   const [savingUazapi, setSavingUazapi] = useState(false);
   const [testingConn, setTestingConn] = useState(false);
+
+  // Números de WhatsApp (instâncias multi-número)
+  const [instances, setInstances] = useState<WaInstance[]>([]);
+  const [newInst, setNewInst] = useState<{ id: string; name: string; url: string; token: string }>({ id: "", name: "", url: "", token: "" });
+  const [savingInst, setSavingInst] = useState(false);
+  const [instErr, setInstErr] = useState<string | null>(null);
 
   // Google Calendar
   const [gcalCalendarId, setGcalCalendarId] = useState("");
@@ -213,7 +219,6 @@ export default function ConfigPage() {
       setTemperature(c.temperature);
       setUazapiUrl(c.uazapiUrl ?? "");
       setUazapiInstance(c.uazapiInstance ?? "");
-      setUazapiTokenSet(c.uazapiTokenSet);
       setNotificationPhone(c.notificationPhone ?? "");
       setGcalCalendarId(c.gcalCalendarId ?? "");
       setGcalClientEmail(c.gcalClientEmail ?? "");
@@ -256,6 +261,46 @@ export default function ConfigPage() {
     }
   }
 
+  async function loadInstances() {
+    const res = await fetch("/api/whatsapp-instances", { cache: "no-store" }).catch(() => null);
+    if (res?.ok) setInstances((await res.json()) as WaInstance[]);
+  }
+
+  async function createInstance() {
+    setSavingInst(true);
+    setInstErr(null);
+    try {
+      const res = await fetch("/api/whatsapp-instances", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: newInst.id, name: newInst.name, uazapi_url: newInst.url, uazapi_token: newInst.token }),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error ?? `HTTP ${res.status}`);
+      setNewInst({ id: "", name: "", url: "", token: "" });
+      await loadInstances();
+    } catch (e) {
+      setInstErr((e as Error).message);
+    } finally {
+      setSavingInst(false);
+    }
+  }
+
+  async function toggleInstance(i: WaInstance) {
+    await fetch(`/api/whatsapp-instances/${i.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ active: !i.active }),
+    });
+    await loadInstances();
+  }
+
+  async function deleteInstance(i: WaInstance) {
+    if (!confirm(`Remover o número "${i.name}"? Leads ligados a ele voltam ao número padrão.`)) return;
+    await fetch(`/api/whatsapp-instances/${i.id}`, { method: "DELETE" });
+    await loadInstances();
+  }
+
   async function saveUazapi() {
     if (!uazapiUrl.startsWith("http")) {
       setErr("URL da Uazapi inválida — deve começar com http(s)://");
@@ -274,7 +319,6 @@ export default function ConfigPage() {
       const j = await res.json();
       if (!res.ok) throw new Error(j.error ?? `HTTP ${res.status}`);
       setUazapiToken("");
-      setUazapiTokenSet(true);
       const waRes = await fetch("/api/whatsapp/status", { cache: "no-store" });
       setWaStatus((await waRes.json()) as WhatsappStatus);
     } catch (e) {
@@ -345,6 +389,7 @@ export default function ConfigPage() {
   useEffect(() => {
     load();
     loadStages();
+    loadInstances();
   }, []);
 
   async function save() {
@@ -409,7 +454,7 @@ export default function ConfigPage() {
         {/* Uazapi — conexão completa */}
         <section style={sectionStyle}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-            <h2 style={{ ...h2Style, marginBottom: 0 }}>Conexão Uazapi (WhatsApp)</h2>
+            <h2 style={{ ...h2Style, marginBottom: 0 }}>Notificações & Webhook</h2>
             {waStatus && (
               <span style={{
                 display: "inline-flex", alignItems: "center", gap: 6,
@@ -423,26 +468,12 @@ export default function ConfigPage() {
             )}
           </div>
 
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            {/* Row 1: Server URL + Instance */}
-            <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 10 }}>
-              <div>
-                <label style={labelStyle}>Server URL</label>
-                <input type="url" value={uazapiUrl}
-                  onChange={(e) => setUazapiUrl(e.target.value)}
-                  placeholder="https://free.uazapi.com"
-                  style={inputStyle} />
-              </div>
-              <div>
-                <label style={labelStyle}>Nome da instância</label>
-                <input type="text" value={uazapiInstance}
-                  onChange={(e) => setUazapiInstance(e.target.value)}
-                  placeholder="ex: ysl1Yl"
-                  style={inputStyle} />
-              </div>
-            </div>
+          <div style={{ fontSize: 12, color: "var(--crm-text-3)", marginBottom: 14, lineHeight: 1.6 }}>
+            Os números de WhatsApp (servidor, token, conexão) são gerenciados na seção <strong>Números de WhatsApp</strong> abaixo. Aqui ficam só o número que recebe as notificações e a URL do webhook.
+          </div>
 
-            {/* Row 1b: Número de notificação do coordenador */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {/* Número de notificação do coordenador */}
             <div>
               <label style={labelStyle}>
                 Número de notificação do coordenador
@@ -459,30 +490,7 @@ export default function ConfigPage() {
               />
             </div>
 
-            {/* Row 2: Token */}
-            <div>
-              <label style={labelStyle}>
-                Token da instância
-                {uazapiTokenSet && !uazapiToken && (
-                  <span style={{ fontWeight: 400, color: "var(--crm-success)", marginLeft: 8 }}>✓ configurado</span>
-                )}
-              </label>
-              <div style={{ display: "flex", gap: 6 }}>
-                <input
-                  type={showUazapiToken ? "text" : "password"}
-                  value={uazapiToken}
-                  onChange={(e) => setUazapiToken(e.target.value)}
-                  placeholder={uazapiTokenSet ? "Deixe em branco para manter o token atual" : "Cole o token da instância aqui"}
-                  style={{ ...inputStyle, flex: 1, fontFamily: "JetBrains Mono, monospace" }}
-                />
-                <button type="button" onClick={() => setShowUazapiToken((v) => !v)} style={btnSecondary}
-                  title={showUazapiToken ? "Ocultar" : "Mostrar"}>
-                  {showUazapiToken ? "🙈" : "👁️"}
-                </button>
-              </div>
-            </div>
-
-            {/* Row 3: Webhook URL (read-only) */}
+            {/* Webhook URL (read-only) */}
             <div>
               <label style={labelStyle}>URL do Webhook <span style={{ fontWeight: 400, color: "var(--crm-text-3)" }}>(configure no painel Uazapi)</span></label>
               <div style={{ display: "flex", gap: 6 }}>
@@ -511,8 +519,74 @@ export default function ConfigPage() {
               <button onClick={testUazapiConn} disabled={testingConn} style={btnSecondary}>
                 {testingConn ? "Testando..." : "↻ Testar conexão"}
               </button>
-              <button onClick={saveUazapi} disabled={savingUazapi || !uazapiUrl} style={btnPrimary}>
-                {savingUazapi ? "Salvando..." : "Salvar configurações Uazapi"}
+              <button onClick={saveUazapi} disabled={savingUazapi} style={btnPrimary}>
+                {savingUazapi ? "Salvando..." : "Salvar"}
+              </button>
+            </div>
+          </div>
+        </section>
+
+        {/* Números de WhatsApp (multi-número) */}
+        <section style={sectionStyle}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+            <h2 style={{ ...h2Style, marginBottom: 0 }}>Números de WhatsApp</h2>
+            <span style={{ fontSize: 12, color: "var(--crm-text-3)" }}>
+              {instances.length} cadastrado(s) · {instances.filter((i) => i.active).length} ativo(s)
+            </span>
+          </div>
+
+          <div style={{ fontSize: 12, color: "var(--crm-text-3)", marginBottom: 14, lineHeight: 1.6 }}>
+            Cada número é uma instância do uazapi com seu próprio token. Os disparos são distribuídos automaticamente
+            (round-robin) entre os números <strong>ativos</strong>, e cada lead é respondido sempre pelo mesmo número.
+            Aponte o webhook de cada instância no uazapi para{" "}
+            <code style={{ fontFamily: "JetBrains Mono, monospace" }}>
+              {typeof window !== "undefined" ? `${window.location.origin}/api/uazapi/webhook` : "/api/uazapi/webhook"}
+            </code>{" "}(sem parâmetro).
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
+            {instances.length === 0 && (
+              <div style={{ fontSize: 13, color: "var(--crm-text-3)", padding: "8px 0" }}>
+                Nenhum número cadastrado — usando o token global (modo 1-número).
+              </div>
+            )}
+            {instances.map((i) => (
+              <div key={i.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", border: "1px solid var(--crm-border)", borderRadius: 8, background: "var(--crm-surface-2)" }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: i.active ? "var(--crm-success)" : "var(--crm-text-4)", flexShrink: 0 }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "var(--crm-text)" }}>{i.name}</div>
+                  <div style={{ fontSize: 11, color: "var(--crm-text-3)", fontFamily: "JetBrains Mono, monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    +{i.id} · {i.uazapi_url || "sem URL"} · token {i.token_set ? "✓" : "—"}
+                  </div>
+                </div>
+                <button onClick={() => toggleInstance(i)} style={btnSecondary} title={i.active ? "Desativar (sai do round-robin)" : "Ativar"}>
+                  {i.active ? "Ativo" : "Inativo"}
+                </button>
+                <button onClick={() => deleteInstance(i)} style={{ ...btnSecondary, color: "var(--crm-danger)" }} title="Remover">🗑️</button>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: "1px solid var(--crm-border)", paddingTop: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--crm-text-2)" }}>Adicionar número</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <input value={newInst.id} onChange={(e) => setNewInst({ ...newInst, id: e.target.value })}
+                placeholder="Número com DDI (ex: 17869874674)"
+                style={{ ...inputStyle, flex: "1 1 200px", fontFamily: "JetBrains Mono, monospace" }} />
+              <input value={newInst.name} onChange={(e) => setNewInst({ ...newInst, name: e.target.value })}
+                placeholder="Nome (ex: Sofia 2 - Miami)"
+                style={{ ...inputStyle, flex: "1 1 180px" }} />
+            </div>
+            <input value={newInst.url} onChange={(e) => setNewInst({ ...newInst, url: e.target.value })}
+              placeholder="Server URL do uazapi (ex: https://salus.uazapi.com)"
+              style={{ ...inputStyle, fontFamily: "JetBrains Mono, monospace" }} />
+            <input value={newInst.token} onChange={(e) => setNewInst({ ...newInst, token: e.target.value })}
+              placeholder="Token da instância no uazapi"
+              style={{ ...inputStyle, fontFamily: "JetBrains Mono, monospace" }} />
+            {instErr && <div style={{ fontSize: 12, color: "var(--crm-danger)" }}>{instErr}</div>}
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <button onClick={createInstance} disabled={savingInst || !newInst.id || !newInst.name || !newInst.url || !newInst.token} style={btnPrimary}>
+                {savingInst ? "Salvando..." : "+ Adicionar número"}
               </button>
             </div>
           </div>
