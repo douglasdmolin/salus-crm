@@ -54,7 +54,8 @@ type AnthropicCredits = {
   error?: string;
 };
 
-type WaInstance = { id: string; name: string; uazapi_url: string; active: boolean; token_set: boolean; created_at: string };
+type WaProvider = "uazapi" | "evolution";
+type WaInstance = { id: string; name: string; provider: WaProvider; instance_name: string; uazapi_url: string; active: boolean; token_set: boolean; created_at: string };
 
 export default function ConfigPage() {
   const [cfg, setCfg] = useState<ConfigResponse | null>(null);
@@ -81,7 +82,7 @@ export default function ConfigPage() {
 
   // Números de WhatsApp (instâncias multi-número)
   const [instances, setInstances] = useState<WaInstance[]>([]);
-  const [newInst, setNewInst] = useState<{ id: string; name: string; url: string; token: string }>({ id: "", name: "", url: "", token: "" });
+  const [newInst, setNewInst] = useState<{ id: string; name: string; provider: WaProvider; instance_name: string; url: string; token: string }>({ id: "", name: "", provider: "uazapi", instance_name: "", url: "", token: "" });
   const [savingInst, setSavingInst] = useState(false);
   const [instErr, setInstErr] = useState<string | null>(null);
 
@@ -273,11 +274,11 @@ export default function ConfigPage() {
       const res = await fetch("/api/whatsapp-instances", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: newInst.id, name: newInst.name, uazapi_url: newInst.url, uazapi_token: newInst.token }),
+        body: JSON.stringify({ id: newInst.id, name: newInst.name, provider: newInst.provider, instance_name: newInst.instance_name, uazapi_url: newInst.url, uazapi_token: newInst.token }),
       });
       const j = await res.json();
       if (!res.ok) throw new Error(j.error ?? `HTTP ${res.status}`);
-      setNewInst({ id: "", name: "", url: "", token: "" });
+      setNewInst({ id: "", name: "", provider: "uazapi", instance_name: "", url: "", token: "" });
       await loadInstances();
     } catch (e) {
       setInstErr((e as Error).message);
@@ -536,12 +537,15 @@ export default function ConfigPage() {
           </div>
 
           <div style={{ fontSize: 12, color: "var(--crm-text-3)", marginBottom: 14, lineHeight: 1.6 }}>
-            Cada número é uma instância do uazapi com seu próprio token. Os disparos são distribuídos automaticamente
-            (round-robin) entre os números <strong>ativos</strong>, e cada lead é respondido sempre pelo mesmo número.
-            Aponte o webhook de cada instância no uazapi para{" "}
+            Cada número é uma instância (uazapi ou Evolution API) com seu próprio token. Os disparos são distribuídos
+            automaticamente (round-robin) entre os números <strong>ativos</strong>, e cada lead é respondido sempre
+            pelo mesmo número. Aponte o webhook de cada instância para o endpoint do seu provider:{" "}
             <code style={{ fontFamily: "JetBrains Mono, monospace" }}>
               {typeof window !== "undefined" ? `${window.location.origin}/api/uazapi/webhook` : "/api/uazapi/webhook"}
-            </code>{" "}(sem parâmetro).
+            </code>{" "}(uazapi) ou{" "}
+            <code style={{ fontFamily: "JetBrains Mono, monospace" }}>
+              {typeof window !== "undefined" ? `${window.location.origin}/api/evolution/webhook` : "/api/evolution/webhook"}
+            </code>{" "}(Evolution, evento MESSAGES_UPSERT).
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
@@ -554,9 +558,14 @@ export default function ConfigPage() {
               <div key={i.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", border: "1px solid var(--crm-border)", borderRadius: 8, background: "var(--crm-surface-2)" }}>
                 <span style={{ width: 8, height: 8, borderRadius: "50%", background: i.active ? "var(--crm-success)" : "var(--crm-text-4)", flexShrink: 0 }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: "var(--crm-text)" }}>{i.name}</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "var(--crm-text)", display: "flex", alignItems: "center", gap: 6 }}>
+                    {i.name}
+                    <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3, padding: "1px 6px", borderRadius: 4, background: i.provider === "evolution" ? "#7c3aed22" : "var(--crm-accent-soft)", color: i.provider === "evolution" ? "#7c3aed" : "var(--crm-accent)" }}>
+                      {i.provider === "evolution" ? "Evolution" : "uazapi"}
+                    </span>
+                  </div>
                   <div style={{ fontSize: 11, color: "var(--crm-text-3)", fontFamily: "JetBrains Mono, monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    +{i.id} · {i.uazapi_url || "sem URL"} · token {i.token_set ? "✓" : "—"}
+                    +{i.id} · {i.uazapi_url || "sem URL"}{i.provider === "evolution" && i.instance_name ? ` · ${i.instance_name}` : ""} · token {i.token_set ? "✓" : "—"}
                   </div>
                 </div>
                 <button onClick={() => toggleInstance(i)} style={btnSecondary} title={i.active ? "Desativar (sai do round-robin)" : "Ativar"}>
@@ -569,6 +578,24 @@ export default function ConfigPage() {
 
           <div style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: "1px solid var(--crm-border)", paddingTop: 14 }}>
             <div style={{ fontSize: 12, fontWeight: 600, color: "var(--crm-text-2)" }}>Adicionar número</div>
+            {/* Plataforma */}
+            <div style={{ display: "flex", gap: 8 }}>
+              {(["uazapi", "evolution"] as WaProvider[]).map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => setNewInst({ ...newInst, provider: p })}
+                  style={{
+                    flex: 1, padding: "8px 10px", borderRadius: 6, cursor: "pointer", fontSize: 13, fontWeight: 600,
+                    border: newInst.provider === p ? "2px solid var(--crm-accent)" : "1px solid var(--crm-border)",
+                    background: newInst.provider === p ? "var(--crm-accent-soft)" : "var(--crm-surface-2)",
+                    color: "var(--crm-text)",
+                  }}
+                >
+                  {p === "evolution" ? "Evolution API" : "uazapi"}
+                </button>
+              ))}
+            </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <input value={newInst.id} onChange={(e) => setNewInst({ ...newInst, id: e.target.value })}
                 placeholder="Número com DDI (ex: 17869874674)"
@@ -578,14 +605,19 @@ export default function ConfigPage() {
                 style={{ ...inputStyle, flex: "1 1 180px" }} />
             </div>
             <input value={newInst.url} onChange={(e) => setNewInst({ ...newInst, url: e.target.value })}
-              placeholder="Server URL do uazapi (ex: https://salus.uazapi.com)"
+              placeholder={newInst.provider === "evolution" ? "Server URL do Evolution (ex: https://meu-evolution.com)" : "Server URL do uazapi (ex: https://salus.uazapi.com)"}
               style={{ ...inputStyle, fontFamily: "JetBrains Mono, monospace" }} />
+            {newInst.provider === "evolution" && (
+              <input value={newInst.instance_name} onChange={(e) => setNewInst({ ...newInst, instance_name: e.target.value })}
+                placeholder="Nome da instância no Evolution (instanceName)"
+                style={{ ...inputStyle, fontFamily: "JetBrains Mono, monospace" }} />
+            )}
             <input value={newInst.token} onChange={(e) => setNewInst({ ...newInst, token: e.target.value })}
-              placeholder="Token da instância no uazapi"
+              placeholder={newInst.provider === "evolution" ? "apikey da instância no Evolution" : "Token da instância no uazapi"}
               style={{ ...inputStyle, fontFamily: "JetBrains Mono, monospace" }} />
             {instErr && <div style={{ fontSize: 12, color: "var(--crm-danger)" }}>{instErr}</div>}
             <div style={{ display: "flex", justifyContent: "flex-end" }}>
-              <button onClick={createInstance} disabled={savingInst || !newInst.id || !newInst.name || !newInst.url || !newInst.token} style={btnPrimary}>
+              <button onClick={createInstance} disabled={savingInst || !newInst.id || !newInst.name || !newInst.url || !newInst.token || (newInst.provider === "evolution" && !newInst.instance_name)} style={btnPrimary}>
                 {savingInst ? "Salvando..." : "+ Adicionar número"}
               </button>
             </div>

@@ -1,31 +1,13 @@
 import { RetryableError } from "workflow";
-import { getUazapiConfig } from "../../lib/crm-config";
+import { getWhatsappConfig } from "../../lib/crm-config";
 import { redactWhatsapp } from "../../lib/redact";
 import { createServiceClient } from "../../lib/supabase";
+import { getAdapter, normalizePhone } from "../../lib/whatsapp";
 
 const TYPING_DELAY_MS = 5_000;
 
 /**
- * Normalizes a phone to the digits-only form expected by Uazapi.
- * Números em E.164 (com "+") já trazem o código do país (US "+1...", BR "+55...")
- * e são usados como estão — NUNCA prefixar 55. Só aplica heurística brasileira
- * para entradas legadas sem "+".
- * Aceita: "+17863281653", "+5511999887766", "(11) 99988-7766", "11999887766".
- */
-function normalizePhone(raw: string): string {
-  const trimmed = (raw ?? "").trim();
-  const digits = trimmed.replace(/\D/g, "");
-  // E.164 (com +): já tem código de país — confia no número.
-  if (trimmed.startsWith("+")) return digits;
-  // Sem "+": assume número brasileiro (comportamento legado).
-  if (digits.length === 11) return "55" + digits;
-  if (digits.length === 13 && digits.startsWith("55")) return digits;
-  if (digits.length >= 10) return digits.startsWith("55") ? digits : "55" + digits;
-  return digits;
-}
-
-/**
- * Sends a WhatsApp message via Uazapi.
+ * Sends a WhatsApp message via the lead's provider (uazapi | evolution).
  * Throws RetryableError on 429/5xx (WDK retries automatically).
  * Logs every attempt to message_log INLINE (no nested step).
  */
@@ -33,7 +15,7 @@ export async function sendWhatsapp(leadId: string, message: string): Promise<str
   "use step";
   const supabase = createServiceClient();
 
-  // Busca o lead primeiro — precisamos do whatsapp_instance_id para escolher o número de envio.
+  // Busca o lead primeiro — precisamos do whatsapp_instance_id para escolher o número/provider de envio.
   const { data: lead, error: leadErr } = await supabase
     .from("applications")
     .select("id, phone, do_not_contact, full_name, whatsapp_instance_id")
@@ -45,9 +27,10 @@ export async function sendWhatsapp(leadId: string, message: string): Promise<str
     throw new Error(`Application ${leadId} not found: ${leadErr?.message ?? "no row"}`);
   }
 
-  // Resolve a instância do lead (multi-número). Sem instância → token global (modo 1-número).
-  const uazapi = await getUazapiConfig((lead as { whatsapp_instance_id?: string | null }).whatsapp_instance_id);
-  if (!uazapi) throw new Error("Uazapi não configurado — defina URL e Token nas Configurações do CRM");
+  // Resolve a instância do lead (multi-número/multi-provider). Sem instância → config global.
+  const cfg = await getWhatsappConfig((lead as { whatsapp_instance_id?: string | null }).whatsapp_instance_id);
+  if (!cfg) throw new Error("WhatsApp não configurado — defina URL e Token nas Configurações do CRM");
+  const adapter = getAdapter(cfg.provider);
 
   if (lead.do_not_contact) {
     console.log("sendWhatsapp: skipped (do_not_contact)", { leadId });
@@ -64,19 +47,11 @@ export async function sendWhatsapp(leadId: string, message: string): Promise<str
   }
 
   const phone = normalizePhone(lead.phone);
-  console.log("sendWhatsapp: composing", { leadId, phone: redactWhatsapp(phone), len: message.length });
+  console.log("sendWhatsapp: composing", { leadId, provider: cfg.provider, phone: redactWhatsapp(phone), len: message.length });
 
-  // 1) Show "digitando..." indicator to make it feel human.
-  //    Fire-and-forget (don't fail send if this errors).
+  // 1) Show "digitando..." indicator to make it feel human. Fire-and-forget.
   try {
-    await fetch(`${uazapi.url}/message/presence`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        token: uazapi.token,
-      },
-      body: JSON.stringify({ number: phone, presence: "composing" }),
-    });
+    await adapter.sendPresence(cfg, phone);
   } catch (presenceErr) {
     console.warn("sendWhatsapp: presence indicator failed (non-fatal)", String(presenceErr));
   }
@@ -85,92 +60,50 @@ export async function sendWhatsapp(leadId: string, message: string): Promise<str
   await new Promise((resolve) => setTimeout(resolve, TYPING_DELAY_MS));
 
   // 3) Send the actual message (also stops typing indicator automatically).
-  let res: Response;
-  try {
-    res = await fetch(`${uazapi.url}/send/text`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        token: uazapi.token,
-      },
-      body: JSON.stringify({ number: phone, text: message }),
-    });
-  } catch (fetchErr) {
-    console.error("sendWhatsapp: fetch threw", String(fetchErr));
+  const result = await adapter.sendText(cfg, phone, message);
+
+  console.log("sendWhatsapp: response", { provider: cfg.provider, status: result.httpStatus, idPresent: Boolean(result.messageId) });
+
+  if (!result.ok) {
     await supabase.from("message_log").insert({
       application_id: leadId,
       numero_normalizado: phone,
       texto: message,
-      http_status: 0,
-      uazapi_response: { error: String(fetchErr) },
+      http_status: result.httpStatus,
+      uazapi_response: result.raw as Record<string, unknown>,
       status: "failed",
-      error_reason: "fetch_exception",
+      error_reason: result.errorReason ?? `http_${result.httpStatus}`,
     });
-    throw new RetryableError("Uazapi fetch error", { retryAfter: "15s" });
+    // 429/5xx/erro de rede → retryável; demais falhas → erro definitivo.
+    if (result.retryAfter) {
+      throw new RetryableError(`WhatsApp ${cfg.provider} ${result.errorReason ?? result.httpStatus}`, { retryAfter: result.retryAfter });
+    }
+    throw new Error(`WhatsApp ${cfg.provider} failed: ${result.httpStatus}`);
   }
 
-  let responseBody: unknown = null;
-  try {
-    responseBody = await res.json();
-  } catch {
-    responseBody = { raw: await res.text() };
-  }
-
-  console.log("sendWhatsapp: response", { status: res.status, idPresent: Boolean((responseBody as { id?: string; messageid?: string })?.id ?? (responseBody as { messageid?: string })?.messageid) });
-
-  if (res.status === 429) {
-    await supabase.from("message_log").insert({
-      application_id: leadId,
-      numero_normalizado: phone,
-      texto: message,
-      http_status: 429,
-      uazapi_response: responseBody as Record<string, unknown>,
-      status: "failed",
-      error_reason: "rate_limited",
-    });
-    throw new RetryableError("Uazapi rate limited", { retryAfter: "30s" });
-  }
-
-  if (res.status >= 500 && res.status < 600) {
-    await supabase.from("message_log").insert({
-      application_id: leadId,
-      numero_normalizado: phone,
-      texto: message,
-      http_status: res.status,
-      uazapi_response: responseBody as Record<string, unknown>,
-      status: "failed",
-      error_reason: `http_${res.status}`,
-    });
-    throw new RetryableError(`Uazapi ${res.status}`, { retryAfter: "10s" });
-  }
-
-  if (!res.ok) {
-    await supabase.from("message_log").insert({
-      application_id: leadId,
-      numero_normalizado: phone,
-      texto: message,
-      http_status: res.status,
-      uazapi_response: responseBody as Record<string, unknown>,
-      status: "failed",
-      error_reason: `http_${res.status}`,
-    });
-    throw new Error(`Uazapi failed: ${res.status}`);
-  }
-
-  const data = responseBody as { id?: string; messageid?: string };
-  const uazapiId: string = data?.id ?? data?.messageid ?? "unknown";
+  const messageId = result.messageId ?? "unknown";
 
   const { error: logErr } = await supabase.from("message_log").insert({
     application_id: leadId,
     numero_normalizado: phone,
     texto: message,
-    http_status: res.status,
-    uazapi_response: responseBody as Record<string, unknown>,
+    http_status: result.httpStatus,
+    uazapi_response: result.raw as Record<string, unknown>,
     status: "sent",
     error_reason: null,
   });
   if (logErr) console.error("sendWhatsapp: log insert failed", logErr.message);
 
-  console.log("sendWhatsapp: done", { leadId, uazapiId });
-  return uazapiId;
+  // Evolution não sinaliza no webhook que a mensagem saiu da nossa API (não tem
+  // wasSentByApi). Gravamos o id enviado na tabela de idempotência para que o webhook
+  // Evolution pule o eco fromMe desta mesma mensagem (evita mirror + auto-pause indevido).
+  if (cfg.provider === "evolution" && result.messageId) {
+    await supabase
+      .from("processed_uazapi_crm_messages")
+      .insert({ uazapi_id: result.messageId, application_id: leadId })
+      .then(undefined, () => {});
+  }
+
+  console.log("sendWhatsapp: done", { leadId, provider: cfg.provider, messageId });
+  return messageId;
 }

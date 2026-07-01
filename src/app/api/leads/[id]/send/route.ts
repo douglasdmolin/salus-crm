@@ -1,19 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "../../../../../lib/supabase";
-import { getUazapiConfig } from "../../../../../lib/crm-config";
+import { getWhatsappConfig } from "../../../../../lib/crm-config";
 import { isPhoneAllowed } from "../../../../../lib/phone-whitelist";
+import { getAdapter, normalizePhone } from "../../../../../lib/whatsapp";
 
 /**
  * Allows a human operator to send a WhatsApp message directly from the CRM.
- * Does NOT go through the Workflow DevKit — direct Uazapi call.
- * Records the send in message_log with status='sent' and error_reason='human_sent'
+ * Does NOT go through the Workflow DevKit — direct provider call via adapter.
+ * Records the send in message_log with status='sent' and error_reason='human_sent_crm'
  * so it's easy to distinguish from Carol's messages in analytics later.
  */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const [uazapi, { id: leadId }] = await Promise.all([getUazapiConfig(), params]);
-  if (!uazapi) {
-    return NextResponse.json({ error: "Uazapi não configurado — defina URL e Token nas Configurações do CRM" }, { status: 503 });
-  }
+  const { id: leadId } = await params;
 
   let body: { texto?: string };
   try {
@@ -29,7 +27,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const supabase = createServiceClient();
   const { data: lead, error: leadErr } = await supabase
     .from("applications")
-    .select("id, phone, do_not_contact, full_name")
+    .select("id, phone, do_not_contact, full_name, whatsapp_instance_id")
     .eq("id", leadId)
     .maybeSingle();
 
@@ -43,61 +41,42 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     return NextResponse.json({ error: "phone not whitelisted" }, { status: 403 });
   }
 
-  // Normalize phone (digits only with 55 prefix)
-  const digits = lead.phone.replace(/\D/g, "");
-  const phone = digits.length === 11 ? "55" + digits : digits.startsWith("55") ? digits : "55" + digits;
+  // Provider/credenciais do número dono do lead (multi-número/multi-provider).
+  const cfg = await getWhatsappConfig((lead as { whatsapp_instance_id?: string | null }).whatsapp_instance_id);
+  if (!cfg) {
+    return NextResponse.json({ error: "WhatsApp não configurado — defina URL e Token nas Configurações do CRM" }, { status: 503 });
+  }
+  const adapter = getAdapter(cfg.provider);
+
+  const phone = normalizePhone(lead.phone);
 
   // 1) Typing indicator (fire-and-forget)
-  fetch(`${uazapi.url}/message/presence`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", token: uazapi.token },
-    body: JSON.stringify({ number: phone, presence: "composing" }),
-  }).catch(() => {});
-
+  adapter.sendPresence(cfg, phone).catch(() => {});
   // 2) Short human delay to make the typing indicator visible (1s)
   await new Promise((r) => setTimeout(r, 1000));
-
   // 3) Send
-  let res: Response;
-  try {
-    res = await fetch(`${uazapi.url}/send/text`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", token: uazapi.token },
-      body: JSON.stringify({ number: phone, text: texto }),
-    });
-  } catch (err) {
-    await supabase.from("message_log").insert({
-      application_id: leadId,
-      numero_normalizado: phone,
-      texto,
-      http_status: 0,
-      uazapi_response: { error: String(err) },
-      status: "failed",
-      error_reason: "human_send_fetch_error",
-    });
-    return NextResponse.json({ error: "uazapi fetch failed" }, { status: 502 });
-  }
+  const result = await adapter.sendText(cfg, phone, texto);
 
-  let responseBody: unknown = null;
-  try {
-    responseBody = await res.json();
-  } catch {
-    responseBody = { raw: await res.text() };
-  }
-
-  const isOk = res.ok;
   await supabase.from("message_log").insert({
     application_id: leadId,
     numero_normalizado: phone,
     texto,
-    http_status: res.status,
-    uazapi_response: responseBody as Record<string, unknown>,
-    status: isOk ? "sent" : "failed",
-    error_reason: isOk ? "human_sent_crm" : `http_${res.status}`,
+    http_status: result.httpStatus,
+    uazapi_response: result.raw as Record<string, unknown>,
+    status: result.ok ? "sent" : "failed",
+    error_reason: result.ok ? "human_sent_crm" : (result.errorReason ?? `http_${result.httpStatus}`),
   });
 
-  if (!isOk) {
-    return NextResponse.json({ error: `uazapi ${res.status}` }, { status: 502 });
+  if (!result.ok) {
+    return NextResponse.json({ error: `whatsapp ${cfg.provider} ${result.httpStatus}` }, { status: 502 });
+  }
+
+  // Evolution: grava o id enviado p/ o webhook pular o eco fromMe desta mensagem.
+  if (cfg.provider === "evolution" && result.messageId) {
+    await supabase
+      .from("processed_uazapi_crm_messages")
+      .insert({ uazapi_id: result.messageId, application_id: leadId })
+      .then(undefined, () => {});
   }
 
   // Auto-pause Carol — human has taken over from the CRM

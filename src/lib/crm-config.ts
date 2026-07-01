@@ -1,5 +1,6 @@
 import { createServiceClient } from "./supabase";
 import { DEFAULT_AI_PROMPT_TEMPLATE } from "../config/project";
+import type { InstanceConfig } from "./whatsapp/types";
 
 export type UazapiConfig = { url: string; token: string; instance: string };
 
@@ -39,6 +40,51 @@ export async function getUazapiConfig(instanceId?: string | null): Promise<Uazap
 
   if (!url || !token) return null;
   return { url, token, instance };
+}
+
+/**
+ * Resolução de config PROVIDER-AWARE (uazapi | evolution). É o que envio, envio manual
+ * e status devem usar. As colunas uazapi_url/uazapi_token são o armazenamento genérico
+ * de url/credencial; para Evolution, uazapi_token = apikey e `instance` = instance_name.
+ *
+ * - Sem `instanceId`: config global uazapi (crm_config / env) — modo 1-número.
+ * - Com `instanceId` ativo: sobrepõe provider, url, token e instance com a row.
+ *   Fallback para o global se a instância não existir/estiver inativa.
+ */
+export async function getWhatsappConfig(instanceId?: string | null): Promise<InstanceConfig | null> {
+  const supabase = createServiceClient();
+  const { data } = await supabase
+    .from("crm_config")
+    .select("key, value")
+    .in("key", ["uazapi_url", "uazapi_token", "uazapi_instance"]);
+
+  const map = new Map((data ?? []).map((r) => [r.key as string, r.value as string]));
+  const cfg: InstanceConfig = {
+    provider: "uazapi",
+    url: map.get("uazapi_url") || process.env.UAZAPI_URL || "",
+    token: map.get("uazapi_token") || process.env.UAZAPI_TOKEN || "",
+    instance: map.get("uazapi_instance") || process.env.UAZAPI_INSTANCE || "",
+  };
+
+  if (instanceId) {
+    const { data: inst } = await supabase
+      .from("whatsapp_instances")
+      .select("provider, uazapi_token, uazapi_url, instance_name, name, active")
+      .eq("id", instanceId)
+      .maybeSingle();
+    if (inst?.active && inst.uazapi_token) {
+      cfg.provider = (inst.provider as InstanceConfig["provider"]) || "uazapi";
+      cfg.token = inst.uazapi_token as string;
+      if (inst.uazapi_url) cfg.url = inst.uazapi_url as string;
+      cfg.instance =
+        cfg.provider === "evolution"
+          ? ((inst.instance_name as string) || "")
+          : ((inst.name as string) || cfg.instance);
+    }
+  }
+
+  if (!cfg.url || !cfg.token) return null;
+  return cfg;
 }
 
 /** IDs das instâncias de WhatsApp ativas, em ordem — usado no round-robin do disparo. */
