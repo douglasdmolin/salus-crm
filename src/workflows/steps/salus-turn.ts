@@ -243,18 +243,26 @@ TAGS PREDEFINIDAS (use quando encaixar):
     execute: async ({ mensagem, urgencia }: { mensagem: string; urgencia: "ALTA" | "MEDIA" | "BAIXA" }) => {
       const texto = urgencia === "ALTA" ? `🔴 URGENTE\n${mensagem}` : mensagem;
       try {
-        const { getUazapiConfig } = await import("../../lib/crm-config");
-        const [uazapi, notifPhone] = await Promise.all([getUazapiConfig(), getNotificationPhone()]);
+        const { getWhatsappConfig } = await import("../../lib/crm-config");
+        const { getAdapter } = await import("../../lib/whatsapp");
+        // Notifica o coordenador pelo MESMO número/provider que conversa com este lead,
+        // não pela config global. Busca a instância do lead (fresh) e resolve o adapter.
+        const { data: fresh } = await supabase
+          .from("applications")
+          .select("whatsapp_instance_id")
+          .eq("id", leadId)
+          .maybeSingle();
+        const instanceId = (fresh as { whatsapp_instance_id?: string | null } | null)?.whatsapp_instance_id ?? null;
+        const [cfg, notifPhone] = await Promise.all([getWhatsappConfig(instanceId), getNotificationPhone()]);
         if (!notifPhone) {
           console.warn("notificar_agendamento_ze: notification_phone não configurado");
           return { ok: false, reason: "notification_phone_not_set" };
         }
-        if (uazapi) {
-          await fetch(`${uazapi.url}/send/text`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", token: uazapi.token },
-            body: JSON.stringify({ number: notifPhone.replace(/\D/g, ""), text: texto }),
-          });
+        if (cfg) {
+          await getAdapter(cfg.provider).sendText(cfg, notifPhone.replace(/\D/g, ""), texto);
+        } else {
+          console.warn("notificar_agendamento_ze: WhatsApp não configurado para a instância do lead", { leadId, instanceId });
+          return { ok: false, reason: "whatsapp_not_configured" };
         }
       } catch (err) {
         console.error("notificar_agendamento_ze failed", String(err));

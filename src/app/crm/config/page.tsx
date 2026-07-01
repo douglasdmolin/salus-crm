@@ -455,7 +455,7 @@ export default function ConfigPage() {
         {/* Uazapi — conexão completa */}
         <section style={sectionStyle}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-            <h2 style={{ ...h2Style, marginBottom: 0 }}>Notificações & Webhook</h2>
+            <h2 style={{ ...h2Style, marginBottom: 0 }}>Notificações</h2>
             {waStatus && (
               <span style={{
                 display: "inline-flex", alignItems: "center", gap: 6,
@@ -470,7 +470,7 @@ export default function ConfigPage() {
           </div>
 
           <div style={{ fontSize: 12, color: "var(--crm-text-3)", marginBottom: 14, lineHeight: 1.6 }}>
-            Os números de WhatsApp (servidor, token, conexão) são gerenciados na seção <strong>Números de WhatsApp</strong> abaixo. Aqui ficam só o número que recebe as notificações e a URL do webhook.
+            Os números de WhatsApp (servidor, token, conexão) e as URLs de webhook são gerenciados na seção <strong>Números de WhatsApp</strong> abaixo. Aqui fica só o número que recebe as notificações de agendamento e leads quentes.
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -489,30 +489,6 @@ export default function ConfigPage() {
                 placeholder="ex: 5592981951096 ou +55 92 98195-1096"
                 style={{ ...inputStyle, fontFamily: "JetBrains Mono, monospace" }}
               />
-            </div>
-
-            {/* Webhook URL (read-only) */}
-            <div>
-              <label style={labelStyle}>URL do Webhook <span style={{ fontWeight: 400, color: "var(--crm-text-3)" }}>(configure no painel Uazapi)</span></label>
-              <div style={{ display: "flex", gap: 6 }}>
-                <input
-                  type="text"
-                  readOnly
-                  value={typeof window !== "undefined" ? `${window.location.origin}/api/uazapi/webhook` : "/api/uazapi/webhook"}
-                  style={{ ...inputStyle, flex: 1, color: "var(--crm-text-3)", cursor: "default" }}
-                />
-                <button
-                  type="button"
-                  onClick={() => {
-                    const url = `${window.location.origin}/api/uazapi/webhook`;
-                    navigator.clipboard.writeText(url).then(() => alert("URL copiada!"));
-                  }}
-                  style={btnSecondary}
-                  title="Copiar URL do webhook"
-                >
-                  📋 Copiar
-                </button>
-              </div>
             </div>
 
             {/* Row 4: Actions */}
@@ -546,6 +522,29 @@ export default function ConfigPage() {
             <code style={{ fontFamily: "JetBrains Mono, monospace" }}>
               {typeof window !== "undefined" ? `${window.location.origin}/api/evolution/webhook` : "/api/evolution/webhook"}
             </code>{" "}(Evolution, evento MESSAGES_UPSERT).
+          </div>
+
+          {/* URLs de webhook copiáveis (uazapi + Evolution) */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
+            {([
+              { label: "Webhook uazapi", path: "/api/uazapi/webhook", hint: "aponte no painel uazapi" },
+              { label: "Webhook Evolution API", path: "/api/evolution/webhook", hint: "aponte no painel Evolution · evento MESSAGES_UPSERT" },
+            ] as const).map((w) => {
+              const url = typeof window !== "undefined" ? `${window.location.origin}${w.path}` : w.path;
+              return (
+                <div key={w.path}>
+                  <label style={labelStyle}>{w.label} <span style={{ fontWeight: 400, color: "var(--crm-text-3)" }}>({w.hint})</span></label>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <input type="text" readOnly value={url}
+                      style={{ ...inputStyle, flex: 1, color: "var(--crm-text-3)", cursor: "default", fontFamily: "JetBrains Mono, monospace" }} />
+                    <button type="button" onClick={() => navigator.clipboard.writeText(url).then(() => alert("URL copiada!"))}
+                      style={btnSecondary} title={`Copiar ${w.label}`}>
+                      📋 Copiar
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
