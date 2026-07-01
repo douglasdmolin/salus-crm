@@ -80,6 +80,16 @@ export type NormalizedInbound = {
   isGroup: boolean;
   /** payload cru original (persistido em messages_received.raw_payload). */
   raw: unknown;
+
+  // ── Áudio (mensagens de voz) ──────────────────────────────────────────────
+  /** base64 cru do áudio recebido no webhook (transiente — processado na rota, não persistido). */
+  audioBase64?: string;
+  /** mimetype da mídia, ex: "audio/ogg; codecs=opus". */
+  mediaType?: string;
+  /** URL pública do áudio após upload no Storage (para o player no chat). */
+  mediaUrl?: string;
+  /** chave da mensagem na plataforma (para fallback getBase64FromMediaMessage). */
+  mediaKey?: Record<string, unknown>;
 };
 
 export interface WhatsappAdapter {

@@ -16,6 +16,28 @@ function base(url: string): string {
   return url.replace(/\/+$/, "");
 }
 
+/**
+ * Busca o base64 de uma mídia (áudio/imagem) sob demanda — fallback para quando o
+ * "Webhook Base64" não está ativo na Evolution e o payload não traz o base64 embutido.
+ * Retorna null em qualquer falha (não-fatal).
+ */
+export async function evolutionGetMediaBase64(cfg: InstanceConfig, messageKey: Record<string, unknown>): Promise<string | null> {
+  if (!cfg.instance) return null;
+  try {
+    const res = await fetch(`${base(cfg.url)}/chat/getBase64FromMediaMessage/${encodeURIComponent(cfg.instance)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", apikey: cfg.token },
+      body: JSON.stringify({ message: { key: messageKey }, convertToMp4: false }),
+    });
+    if (!res.ok) return null;
+    const j = (await res.json()) as { base64?: string };
+    return j?.base64 ?? null;
+  } catch (err) {
+    console.warn("evolutionGetMediaBase64 failed", String(err));
+    return null;
+  }
+}
+
 export const evolutionAdapter: WhatsappAdapter = {
   async sendText(cfg: InstanceConfig, phone: string, text: string): Promise<SendResult> {
     if (!cfg.instance) {

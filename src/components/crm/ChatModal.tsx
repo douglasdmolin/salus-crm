@@ -7,7 +7,7 @@ import { AiScoreBar, SentimentDot } from "./LeadCard";
 import { useTweaks } from "./tweaks-store";
 import { DEBUG_SOURCES } from "./debug-sources";
 
-type Message = { direction: "in" | "out"; content: string; ts: string; author?: "ai" | "human" | "lead" };
+type Message = { direction: "in" | "out"; content: string; ts: string; author?: "ai" | "human" | "lead"; mediaUrl?: string; mediaType?: string };
 
 type AiEvent = {
   id: number;
@@ -433,7 +433,16 @@ export function ChatModal({ lead: initialLead, onClose }: { lead: UiLead; onClos
                           wordBreak: "break-word",
                           boxShadow: "var(--crm-shadow-sm)",
                         }}>
-                          {m.content}
+                          {m.mediaUrl && (
+                            <div style={{ marginBottom: m.content ? 6 : 0 }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 10.5, fontWeight: 600, color: "var(--crm-text-3)", marginBottom: 3 }}>
+                                <Icon name="mic" size={11} /> Áudio
+                              </div>
+                              <audio controls preload="none" src={m.mediaUrl} style={{ maxWidth: "100%", height: 34 }} />
+                              {m.content && <div style={{ fontSize: 11.5, fontStyle: "italic", color: "var(--crm-text-3)", marginTop: 4 }}>“{m.content}”</div>}
+                            </div>
+                          )}
+                          {!m.mediaUrl && m.content}
                           <div style={{
                             display: "flex",
                             alignItems: "center",

@@ -92,6 +92,22 @@ async function latestInboundAtMs(leadId: string): Promise<number> {
   return data?.received_at ? new Date(data.received_at as string).getTime() : 0;
 }
 
+/**
+ * Limpa o workflow_run_id ao término do run — SÓ se este run ainda é o ativo (mesmo
+ * hook_token), para não clobberar um workflow mais novo que tenha assumido o lead.
+ * Assim, no webhook, run_id != null passa a significar "há workflow vivo" de forma
+ * confiável — o webhook nunca precisa (nem deve) reiniciar, evitando runs duplicados.
+ */
+async function clearWorkflowRun(leadId: string, token: string): Promise<void> {
+  "use step";
+  const supabase = createServiceClient();
+  await supabase
+    .from("applications")
+    .update({ workflow_run_id: null })
+    .eq("id", leadId)
+    .eq("hook_token", token);
+}
+
 export async function leadQualificationWorkflow(leadId: string, hookToken?: string) {
   "use workflow";
 
@@ -107,6 +123,9 @@ export async function leadQualificationWorkflow(leadId: string, hookToken?: stri
   // Etapa 1: abertura (lead em stage inicial) OU retomada (workflow reiniciado/inbound).
   // IDs de entrada válidos: lead_qualificado (migration 002) e novo (legado migration 007)
   const INITIAL_STAGES = ["lead_qualificado", "novo"];
+  // Marca d'água: epoch ms da última mensagem já respondida. Evita que o loop responda
+  // de novo a uma rajada que o branch de abertura (ou um turno anterior) já cobriu.
+  let handledUpToMs = 0;
   if (INITIAL_STAGES.includes(lead.crm_stage)) {
     // Lead novo: envia abertura (mensagem_sugerida ou gerada pela IA) e avança o stage.
     if (lead.mensagem_sugerida) {
@@ -121,20 +140,19 @@ export async function leadQualificationWorkflow(leadId: string, hookToken?: stri
     // Avança para "Lead Contatado" — a Sofia só moverá para "Respondeu" quando o lead responder.
     await updateLeadStatus(leadId, "lead_contatado");
   } else if (!lead.ai_paused && !AI_DISABLED_STAGES.has(lead.crm_stage)) {
-    // Retomada/inbound: responde à mensagem pendente — mas com debounce, pra não
-    // responder no meio de uma rajada (se chegar mais nova, o loop responde a última).
-    const refMs = await latestInboundAtMs(leadId);
+    // Retomada/inbound: debounce e responde UMA vez à rajada pendente, lendo o histórico
+    // completo. Marca até onde já respondeu para o loop não repetir a mesma rajada.
     await sleep(`${DEBOUNCE_SECONDS}s`);
-    if ((await latestInboundAtMs(leadId)) <= refMs) {
-      const history = await getConversationHistory(leadId);
-      const messages: ModelMessage[] = history.map((m) => ({
-        role: m.direction === "in" ? ("user" as const) : ("assistant" as const),
-        content: m.content,
-      }));
-      await salusTurn(leadId, lead, messages, lead.reply_count);
-      // Primeiro turno nesta etapa neste run → 1 (não cumulativo).
-      await autoAdvanceIfStuck(leadId, lead.crm_stage, 1);
-    }
+    const latest = await latestInboundAtMs(leadId);
+    const history = await getConversationHistory(leadId);
+    const messages: ModelMessage[] = history.map((m) => ({
+      role: m.direction === "in" ? ("user" as const) : ("assistant" as const),
+      content: m.content,
+    }));
+    await salusTurn(leadId, lead, messages, lead.reply_count);
+    // Primeiro turno nesta etapa neste run → 1 (não cumulativo).
+    await autoAdvanceIfStuck(leadId, lead.crm_stage, 1);
+    handledUpToMs = latest;
   }
 
   // Etapa 3: loop de conversa com prompt-swap por stage
@@ -152,7 +170,11 @@ export async function leadQualificationWorkflow(leadId: string, hookToken?: stri
     const tsRaw = msg?.timestamp ?? 0;
     const refMs = tsRaw === 0 ? Date.now() : tsRaw < 1e12 ? tsRaw * 1000 : tsRaw;
     await sleep(`${DEBOUNCE_SECONDS}s`);
-    if ((await latestInboundAtMs(leadId)) > refMs) continue;
+    const latest = await latestInboundAtMs(leadId);
+    // Chegou mensagem mais nova durante o debounce → deixa a última responder.
+    if (latest > refMs) continue;
+    // Branch de abertura (ou turno anterior) já respondeu até aqui → não repete a rajada.
+    if (latest <= handledUpToMs) continue;
 
     if (msg?.text) await classifySentiment(leadId, msg.text);
 
@@ -195,6 +217,7 @@ export async function leadQualificationWorkflow(leadId: string, hookToken?: stri
     // Se a Sofia não chamou nenhuma ferramenta de promoção após N turnos NESTA
     // etapa, o sistema avança o stage automaticamente sem depender da IA.
     await autoAdvanceIfStuck(leadId, freshLead.crm_stage, turnsInCurrentStage);
+    handledUpToMs = latest;
 
     turnos++;
     if (turnos >= MAX_TURNS) {
@@ -202,4 +225,9 @@ export async function leadQualificationWorkflow(leadId: string, hookToken?: stri
       break;
     }
   }
+
+  // Encerrou (break/MAX_TURNS) → libera o run_id para que a próxima mensagem inicie um
+  // workflow limpo. Fica FORA de try/finally de propósito: o WDK suspende via sinal de
+  // controle nos sleep/hook, e um finally capturaria esse sinal e quebraria o workflow.
+  await clearWorkflowRun(leadId, token);
 }

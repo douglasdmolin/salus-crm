@@ -61,7 +61,9 @@ export async function handleInbound(n: NormalizedInbound): Promise<InboundResult
     .not("crm_stage", "in", "(fechado,perdido,descartado,fechamento,ganho)")
     .order("created_at", { ascending: false });
 
-  const lead = (candidates ?? []).find((a) => normalizeBrPhone(a.phone) === canonical);
+  let lead = (candidates ?? []).find((a) => normalizeBrPhone(a.phone) === canonical) as
+    | { id: string; crm_stage: string; workflow_run_id: string | null; hook_token: string | null; do_not_contact: boolean; phone: string; ai_paused: boolean; created_at: string }
+    | undefined;
 
   if (!lead) {
     // Número desconhecido. Mensagem de ENTRADA (lead → nós) cria o lead e deixa a Sofia
@@ -75,28 +77,27 @@ export async function handleInbound(n: NormalizedInbound): Promise<InboundResult
     const senderName = (n.senderName ?? "").trim() || `Contato WhatsApp ${digits.slice(-4)}`;
     const newToken = `lead:inbound:${randomUUID()}`;
 
-    const { data: created, error: createErr } = await supabase
-      .from("applications")
-      .insert({
-        full_name: senderName,
-        nome_para_mensagem: senderName.split(" ")[0],
-        phone: phoneE164,
-        crm_stage: "respondeu",
-        do_not_contact: false,
-        reply_count: 0,
-        hook_token: newToken,
-        qualification_notes: JSON.stringify({ origem_principal: "inbound_whatsapp" }),
-        whatsapp_instance_id: n.receivingInstanceId,
-      })
-      .select("id")
-      .single();
+    // Find-or-create ATÔMICO (serializado por telefone no Postgres) — evita que uma
+    // rajada de mensagens crie leads/workflows duplicados. `created` diz se ESTE webhook
+    // criou o lead (e deve iniciar o workflow) ou se um webhook irmão já criou (corrida).
+    const { data: rpcRows, error: rpcErr } = await supabase.rpc("create_inbound_lead", {
+      p_phone: phoneE164,
+      p_full_name: senderName,
+      p_nome_msg: senderName.split(" ")[0],
+      p_stage: "respondeu",
+      p_hook_token: newToken,
+      p_qual_notes: JSON.stringify({ origem_principal: "inbound_whatsapp" }),
+      p_instance_id: n.receivingInstanceId,
+    });
+    const row = (rpcRows as Array<{ id: string; created: boolean; hook_token: string | null }> | null)?.[0];
 
-    if (createErr || !created) {
-      console.error("whatsapp.inbound: failed to create inbound lead", { phone: redactWhatsapp(digits), err: createErr?.message });
+    if (rpcErr || !row) {
+      console.error("whatsapp.inbound: create_inbound_lead failed", { phone: redactWhatsapp(digits), err: rpcErr?.message });
       return { status: 500, body: { error: "create lead failed" } };
     }
-    const newLeadId = created.id as string;
+    const newLeadId = row.id;
 
+    // Sempre grava a mensagem recebida (idempotência + histórico que a Sofia lê).
     if (messageId) {
       await supabase.from("processed_uazapi_crm_messages")
         .insert({ uazapi_id: messageId, application_id: newLeadId })
@@ -109,6 +110,8 @@ export async function handleInbound(n: NormalizedInbound): Promise<InboundResult
       numero: digits,
       texto: text,
       message_type: n.messageType,
+      media_url: n.mediaUrl ?? null,
+      media_type: n.mediaType ?? null,
       received_at: new Date(n.timestampMs).toISOString(),
       raw_payload: n.raw as Record<string, unknown>,
     }).then(undefined, (err) => console.warn("messages_received insert failed (new inbound lead)", String(err)));
@@ -122,6 +125,20 @@ export async function handleInbound(n: NormalizedInbound): Promise<InboundResult
       },
     );
 
+    if (!row.created) {
+      // Corrida: um webhook irmão já criou este lead e vai iniciar o workflow. Aqui só
+      // registramos a mensagem (feito acima) e entregamos ao hook do workflow vencedor —
+      // NUNCA reiniciar (evita run duplicado). O workflow lê o histórico completo e o
+      // debounce coalesce a rajada em UMA resposta.
+      const token = row.hook_token || newToken;
+      for (let i = 0; i < 3; i++) {
+        try { await resumeHook(token, { text, timestamp: Math.floor(n.timestampMs / 1000) || Date.now() }); break; }
+        catch { await new Promise((r) => setTimeout(r, 700)); }
+      }
+      console.log("whatsapp.inbound: coalesced burst message into existing run", { newLeadId });
+      return { status: 200, body: { ok: true, coalesced: true, leadId: newLeadId } };
+    }
+
     try {
       const run = await start(leadQualificationWorkflow, [newLeadId, newToken]);
       await supabase.from("applications").update({ workflow_run_id: run.runId }).eq("id", newLeadId);
@@ -129,6 +146,8 @@ export async function handleInbound(n: NormalizedInbound): Promise<InboundResult
       return { status: 200, body: { ok: true, created: true, leadId: newLeadId } };
     } catch (err) {
       console.error("whatsapp.inbound: start workflow failed for inbound lead", { newLeadId, err: String(err) });
+      // Zera a sentinela 'starting' para que uma próxima mensagem possa reivindicar o início.
+      await supabase.from("applications").update({ workflow_run_id: null }).eq("id", newLeadId).then(undefined, () => {});
       return { status: 500, body: { error: "start workflow failed" } };
     }
   }
@@ -180,6 +199,8 @@ export async function handleInbound(n: NormalizedInbound): Promise<InboundResult
       numero: digits,
       texto: text,
       message_type: n.messageType,
+      media_url: n.mediaUrl ?? null,
+      media_type: n.mediaType ?? null,
       received_at: new Date(n.timestampMs).toISOString(),
       raw_payload: n.raw as Record<string, unknown>,
     });
@@ -198,44 +219,61 @@ export async function handleInbound(n: NormalizedInbound): Promise<InboundResult
   );
 
   const activeLead = lead;
-  async function restartWorkflow(): Promise<void> {
+  const STARTING = "starting";
+  const payload = { text, timestamp: Math.floor(n.timestampMs / 1000) || Date.now() };
+
+  // Inicia um novo run e grava o run_id real (chamado só após vencer o claim atômico).
+  async function startAndPersist(token: string): Promise<void> {
+    const run = await start(leadQualificationWorkflow, [activeLead.id, token]);
+    await supabase.from("applications").update({ workflow_run_id: run.runId }).eq("id", activeLead.id);
+    console.log("whatsapp.inbound: started workflow", { leadId: activeLead.id, runId: run.runId });
+  }
+
+  // Reivindica ATOMICAMENTE o direito de (re)iniciar o workflow (CAS: só muda se o run_id
+  // ainda for o valor que lemos). Marca 'starting' + novo token. Retorna o token se venceu,
+  // ou null se outro webhook já assumiu — evita 2 workflows para o mesmo lead.
+  async function claimStart(prevRun: string | null): Promise<string | null> {
     const newToken = `lead:${activeLead.id}:inbound:${randomUUID()}`;
-    await supabase
-      .from("applications")
-      .update({ hook_token: newToken, workflow_run_id: null })
-      .eq("id", activeLead.id);
-    const run = await start(leadQualificationWorkflow, [activeLead.id, newToken]);
-    await supabase
-      .from("applications")
-      .update({ workflow_run_id: run.runId })
-      .eq("id", activeLead.id);
-    console.log("whatsapp.inbound: restarted workflow", { leadId: activeLead.id, runId: run.runId });
+    let q = supabase.from("applications").update({ workflow_run_id: STARTING, hook_token: newToken });
+    q = prevRun === null ? q.is("workflow_run_id", null) : q.eq("workflow_run_id", prevRun);
+    const { data: claimed } = await q.eq("id", activeLead.id).select("id").maybeSingle();
+    return claimed ? newToken : null;
   }
 
-  const hasActiveRun = !!(activeLead as { workflow_run_id?: string | null }).workflow_run_id;
+  // Entrega best-effort ao hook do workflow (com pequeno retry pra cobrir o hook subindo).
+  async function tryResume(token: string): Promise<boolean> {
+    for (let i = 0; i < 3; i++) {
+      try { await resumeHook(token, payload); return true; }
+      catch { await new Promise((r) => setTimeout(r, 600)); }
+    }
+    return false;
+  }
 
-  if (!hasActiveRun) {
-    try {
-      await restartWorkflow();
-      return { status: 200, body: { ok: true, restarted: true } };
-    } catch (err) {
-      console.error("restartWorkflow failed", { leadId: lead.id, err: String(err) });
-      return { status: 500, body: { error: "restart failed" } };
+  const runId = (activeLead as { workflow_run_id?: string | null }).workflow_run_id ?? null;
+  const curToken = (activeLead as { hook_token?: string | null }).hook_token || `lead:${activeLead.id}:inbound`;
+
+  // Invariante: o workflow LIMPA o run_id ao terminar (finally, via CAS por token).
+  // Logo, run_id != null ⟺ há um workflow vivo (ou subindo). Nunca reiniciamos daqui —
+  // isso elimina a corrida start+restart que criava 2 workflows.
+  //
+  // run_id != null (sentinela 'starting' OU run real) → só entrega a mensagem. Se o hook
+  // ainda não está sendo consumido (workflow no sleep inicial), a entrega falha de leve e a
+  // mensagem fica no histórico — o branch de abertura do workflow a lê e responde 1 vez.
+  if (runId) {
+    await tryResume(curToken);
+    return { status: 200, body: { ok: true, coalesced: true } };
+  }
+
+  // run_id null → nenhum workflow vivo → inicia (CAS a partir de null; só um webhook vence).
+  const startToken = await claimStart(null);
+  if (startToken) {
+    try { await startAndPersist(startToken); return { status: 200, body: { ok: true, started: true } }; }
+    catch (err) {
+      console.error("start failed", { leadId: activeLead.id, err: String(err) });
+      await supabase.from("applications").update({ workflow_run_id: null }).eq("id", activeLead.id).eq("workflow_run_id", STARTING).then(undefined, () => {});
+      return { status: 500, body: { error: "start failed" } };
     }
   }
-
-  const token = (lead as { hook_token?: string | null }).hook_token || `lead:${lead.id}:inbound`;
-  try {
-    await resumeHook(token, { text, timestamp: Math.floor(n.timestampMs / 1000) || Date.now() });
-    return { status: 200, body: { ok: true } };
-  } catch (err) {
-    console.warn("resumeHook failed — restarting workflow", { leadId: lead.id, token, err: String(err) });
-    try {
-      await restartWorkflow();
-      return { status: 200, body: { ok: true, restarted: true } };
-    } catch (err2) {
-      console.error("restartWorkflow failed", { leadId: lead.id, err: String(err2) });
-      return { status: 500, body: { error: "resume+restart failed" } };
-    }
-  }
+  await tryResume(curToken); // outro venceu o claim → best-effort
+  return { status: 200, body: { ok: true, coalesced: true } };
 }

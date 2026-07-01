@@ -8,7 +8,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   const [{ data: inn }, { data: out }] = await Promise.all([
     supabase
       .from("messages_received")
-      .select("texto, received_at, message_type")
+      .select("texto, received_at, message_type, media_url, media_type")
       .eq("application_id", id)
       .order("received_at", { ascending: true }),
     supabase
@@ -19,10 +19,13 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
       .order("attempted_at", { ascending: true }),
   ]);
 
-  type Entry = { direction: "in" | "out"; content: string; ts: string; author: "ai" | "human" | "lead" };
+  type Entry = { direction: "in" | "out"; content: string; ts: string; author: "ai" | "human" | "lead"; mediaUrl?: string; mediaType?: string };
   const msgs: Entry[] = [];
   for (const m of inn ?? []) {
-    if (m.texto) msgs.push({ direction: "in", content: m.texto, ts: m.received_at, author: "lead" });
+    // Mensagens de áudio têm media_url (player) + texto = transcrição; mostra ambos.
+    if (m.texto || m.media_url) {
+      msgs.push({ direction: "in", content: m.texto ?? "", ts: m.received_at, author: "lead", mediaUrl: m.media_url ?? undefined, mediaType: m.media_type ?? undefined });
+    }
   }
   for (const m of out ?? []) {
     if (!m.texto) continue;

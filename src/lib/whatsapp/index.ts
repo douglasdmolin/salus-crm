@@ -107,10 +107,18 @@ export function parseEvolutionWebhook(payload: unknown): NormalizedInbound | nul
         addressingMode?: string;
       };
       pushName?: string;
-      message?: { conversation?: string; extendedTextMessage?: { text?: string } };
+      message?: {
+        conversation?: string;
+        extendedTextMessage?: { text?: string };
+        // Áudio (com "Webhook Base64" ativo, o áudio decodificado vem em `base64`).
+        audioMessage?: { mimetype?: string; seconds?: number; ptt?: boolean };
+        base64?: string;
+      };
+      base64?: string;
       messageType?: string;
       messageTimestamp?: number | string;
     };
+    base64?: string;
   };
 
   // Só mensagens de chat interessam; ignora connection.update, presence.update, etc.
@@ -123,7 +131,9 @@ export function parseEvolutionWebhook(payload: unknown): NormalizedInbound | nul
 
   const remoteJid = key.remoteJid ?? "";
   const text = d.message?.conversation ?? d.message?.extendedTextMessage?.text ?? "";
-  if (!remoteJid || !text) return null;
+  const audio = d.message?.audioMessage;
+  // Precisa de remetente + (texto OU áudio). Sem nenhum dos dois → ignora.
+  if (!remoteJid || (!text && !audio)) return null;
 
   const isGroup = remoteJid.includes("@g.us");
   // Resolve o telefone real: sob LID, o número está em remoteJidAlt (ou participantAlt
@@ -141,6 +151,7 @@ export function parseEvolutionWebhook(payload: unknown): NormalizedInbound | nul
   return {
     messageId: key.id ?? "",
     fromDigits,
+    // Para áudio, o texto (transcrição) é preenchido na rota após baixar/transcrever.
     text,
     fromMe: Boolean(key.fromMe),
     // Evolution não sinaliza envios da própria API — o dedupe é feito por messageId
@@ -148,10 +159,14 @@ export function parseEvolutionWebhook(payload: unknown): NormalizedInbound | nul
     wasSentByApi: false,
     timestampMs: Number.isFinite(tsMs) ? tsMs : Date.now(),
     chatId: realJid || remoteJid,
-    messageType: d.messageType ?? "conversation",
+    messageType: audio ? "audio" : (d.messageType ?? "conversation"),
     senderName: (d.pushName ?? "").trim() || undefined,
     receivingInstanceId,
     isGroup,
     raw: payload,
+    // Áudio: base64 embutido (se "Webhook Base64" ativo) + metadados p/ a rota processar.
+    audioBase64: audio ? (d.message?.base64 ?? d.base64 ?? data.base64) : undefined,
+    mediaType: audio ? (audio.mimetype ?? "audio/ogg") : undefined,
+    mediaKey: audio ? (key as unknown as Record<string, unknown>) : undefined,
   };
 }
