@@ -187,6 +187,23 @@ export async function salusTurn(
     },
   });
 
+  /**
+   * Envia uma mensagem de encerramento ANTES de mudar o lead de estágio (e antes de
+   * eventual pausa da IA). Usa sendWhatsapp (que NÃO checa ai_paused, só do_not_contact),
+   * então funciona mesmo quando o mover vai pausar a IA em seguida. Falha é não-fatal.
+   */
+  async function enviarDespedida(texto?: string): Promise<void> {
+    const t = (texto ?? "").trim();
+    if (!t) return;
+    try {
+      await sendWhatsapp(leadId, t);
+      messagesSent += 1;
+      logEvent(leadId, "message_sent", lead.crm_stage, { preview: t.slice(0, 120), despedida: true });
+    } catch (err) {
+      console.warn("enviarDespedida: falha ao enviar", String(err));
+    }
+  }
+
   const update_lead_metadata = tool({
     description: "Salva dados coletados sobre o lead durante a conversa.",
     inputSchema: z.object({
@@ -297,15 +314,18 @@ TAGS PREDEFINIDAS (use quando encaixar):
   });
 
   const archive_lead = tool({
-    description: "Marca o lead como perdido ou descartado com motivo.",
+    description: "Marca o lead como perdido ou descartado com motivo. OBRIGATÓRIO: escreva em 'mensagem_despedida' um encerramento curto e cordial na voz da Sofia, agradecendo o retorno. Ela é enviada ao lead automaticamente antes de encerrar, e a IA é desativada em seguida. NÃO use a tool 'responder' junto — a despedida vai só por aqui.",
     inputSchema: z.object({
       motivo: z.string(),
       tipo: z.enum(["perdido", "descartado"]).default("perdido"),
+      mensagem_despedida: z.string().describe("Mensagem de encerramento (agradecendo o retorno) enviada ao lead antes de arquivar"),
     }),
-    execute: async ({ motivo, tipo }: { motivo: string; tipo: "perdido" | "descartado" }) => {
+    execute: async ({ motivo, tipo, mensagem_despedida }: { motivo: string; tipo: "perdido" | "descartado"; mensagem_despedida?: string }) => {
+      await enviarDespedida(mensagem_despedida);
       await supabase.from("applications")
-        .update({ crm_stage: tipo, descarte_motivo: motivo, ai_paused: true })
+        .update({ crm_stage: tipo, descarte_motivo: motivo, ai_paused: true, ai_paused_at: new Date().toISOString() })
         .eq("id", leadId);
+      logEvent(leadId, "stage_changed", tipo, { from_stage: lead.crm_stage, to_stage: tipo, reason: motivo, despedida_enviada: Boolean((mensagem_despedida ?? "").trim()) });
       return { ok: true };
     },
   });
@@ -371,12 +391,14 @@ TAGS PREDEFINIDAS (use quando encaixar):
   });
 
   const agendar_retorno = tool({
-    description: "Registra data para retomar contato e move lead para Contato Futuro. Use quando o lead pediu pra falar depois de uma data específica ('me liga depois do dia 13', 'só semana que vem', 'me chama em julho').",
+    description: "Registra data para retomar contato e move lead para Contato Futuro. Use quando o lead pediu pra falar depois de uma data específica ('me liga depois do dia 13', 'só semana que vem', 'me chama em julho'). OBRIGATÓRIO: escreva em 'mensagem_despedida' um encerramento curto na voz da Sofia, no sentido de que vocês voltam a se falar em breve (pode referenciar a data). Ela é enviada ao lead automaticamente. NÃO use a tool 'responder' junto.",
     inputSchema: z.object({
       data_retorno: z.string().describe("Data alvo no formato YYYY-MM-DD ou descrição legível ex: '2024-06-13'"),
       motivo: z.string().optional().describe("O que o lead disse — contextualiza o retorno"),
+      mensagem_despedida: z.string().describe("Mensagem de encerramento ('falamos em breve') enviada ao lead antes de mover para Contato Futuro"),
     }),
-    execute: async ({ data_retorno, motivo }: { data_retorno: string; motivo?: string }) => {
+    execute: async ({ data_retorno, motivo, mensagem_despedida }: { data_retorno: string; motivo?: string; mensagem_despedida?: string }) => {
+      await enviarDespedida(mensagem_despedida);
       let reengageIso: string | null = null;
       try {
         const parsed = new Date(data_retorno);
@@ -402,14 +424,25 @@ TAGS PREDEFINIDAS (use quando encaixar):
   // Nomes semânticos alinhados com os labels do kanban (migration 002 IDs).
   // Aliases com nomes antigos mantidos para compatibilidade com prompts configurados no DB.
 
-  const mkP = (nextStage: string, pauseAi = false) => tool({
-    description: `Move o lead para o stage ${nextStage}.`,
-    inputSchema: z.object({ motivo: z.string().optional() }),
-    execute: async (_: { motivo?: string }) => {
-      await transitionStage(leadId, lead.crm_stage, nextStage, pauseAi);
-      return { ok: true };
-    },
-  });
+  const mkP = (nextStage: string, opts: { pauseAi?: boolean; farewell?: boolean } = {}) => {
+    const { pauseAi = false, farewell = false } = opts;
+    const despedidaHint = nextStage === "contato_futuro"
+      ? "no sentido de que vocês voltam a se falar em breve, com leveza"
+      : "agradecendo o retorno e encerrando com cordialidade";
+    return tool({
+      description: farewell
+        ? `Move o lead para o stage ${nextStage}. OBRIGATÓRIO: escreva em 'mensagem_despedida' uma mensagem curta de encerramento na voz da Sofia, ${despedidaHint}. Ela é enviada ao lead automaticamente${pauseAi ? " e a IA é desativada em seguida" : ""}. NÃO use a tool 'responder' junto — a despedida vai só por aqui.`
+        : `Move o lead para o stage ${nextStage}.`,
+      inputSchema: farewell
+        ? z.object({ motivo: z.string().optional(), mensagem_despedida: z.string().describe("Mensagem de encerramento enviada ao lead antes de mudar de estágio") })
+        : z.object({ motivo: z.string().optional() }),
+      execute: async (args: { motivo?: string; mensagem_despedida?: string }) => {
+        if (farewell) await enviarDespedida(args.mensagem_despedida);
+        await transitionStage(leadId, lead.crm_stage, nextStage, pauseAi);
+        return { ok: true };
+      },
+    });
+  };
 
   // ── Tools de promoção — IDs canônicos (pipeline definitivo) ───────────
   const mover_para_lead_contatado = mkP("lead_contatado");          // volta para aguardando resposta
@@ -417,8 +450,8 @@ TAGS PREDEFINIDAS (use quando encaixar):
   const mover_para_aquecendo      = mkP("aquecendo");               // engajado mas não pronto para agendar
   // mover_para_agendado — definido acima com gate determinístico (data + horário + endereço)
   const mover_para_objecao        = mkP("objecao");                 // objeção comercial ativa
-  const mover_para_contato_futuro = mkP("contato_futuro");          // reativação futura
-  const mover_para_perdido        = mkP("perdido", true);           // saiu do funil → pausa IA
+  const mover_para_contato_futuro = mkP("contato_futuro", { farewell: true });          // despedida "falamos em breve"; mantém reativação (não pausa)
+  const mover_para_perdido        = mkP("perdido", { pauseAi: true, farewell: true });  // despedida + saiu do funil → pausa IA
 
   const mover_para_pos_visita = tool({
     description: "Move lead para Pós-Visita após Marcelo ter visitado. Informe se a visita foi realizada ou se o lead não atendeu (no_show).",
