@@ -13,9 +13,9 @@ type Result = {
 
 const BATCH_SIZES = [10, 20, 30] as const;
 const INTERVALS = [
-  { seconds: 90, label: "Lento (90s)", risk: "🟢 Mais seguro" },
-  { seconds: 60, label: "Médio (60s)", risk: "🟡 Recomendado" },
-  { seconds: 30, label: "Rápido (30s)", risk: "🔴 Risco moderado" },
+  { seconds: 180, label: "Lento (180s)", risk: "🟢 Mais seguro" },
+  { seconds: 120, label: "Médio (120s)", risk: "🟡 Recomendado" },
+  { seconds: 90, label: "Rápido (90s)", risk: "🔴 Risco moderado" },
 ] as const;
 
 export function DispatchModal({
@@ -36,7 +36,7 @@ export function DispatchModal({
   onDispatched: () => void;
 }) {
   const [batchSize, setBatchSize] = useState<number>(20);
-  const [intervalSeconds, setIntervalSeconds] = useState<number>(60);
+  const [intervalSeconds, setIntervalSeconds] = useState<number>(120);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<Result | null>(null);

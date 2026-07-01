@@ -6,7 +6,7 @@ import { isPhoneAllowedRuntime } from "../../../../lib/phone-whitelist";
 import { listActiveInstanceIds } from "../../../../lib/crm-config";
 
 const ALLOWED_BATCH_SIZES = [10, 20, 30] as const;
-const ALLOWED_INTERVALS = [30, 60, 90] as const;
+const ALLOWED_INTERVALS = [90, 120, 180] as const;
 // Stages que podem receber disparo. O disparo é específico da etapa: cada botão
 // do board envia apenas as stages da sua coluna.
 //   lead_qualificado — lead novo aguardando primeiro contato (canônico)
